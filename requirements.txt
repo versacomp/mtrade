@@ -1,0 +1,9 @@
+# MTrade - Trading Tool
+# Flet UI framework (latest)
+flet>=0.25.0
+
+# HTTP client
+requests>=2.31.0
+
+# Environment configuration
+python-dotenv>=1.0.0
