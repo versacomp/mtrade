@@ -9,6 +9,7 @@ API Overview: https://developer.tastytrade.com/api-overview/
 import asyncio
 import flet as ft
 
+from views.chart_view import build_chart_view
 from views.dashboard_view import build_dashboard_view
 from views.login_view import build_login_view
 
@@ -63,6 +64,12 @@ def main(page: ft.Page) -> None:
         elif troute.match("/dashboard"):
             if client_ref:
                 page.views.append(build_dashboard_view(client_ref[0], page))
+            else:
+                asyncio.create_task(page.push_route("/"))
+                return
+        elif troute.match("/chart"):
+            if client_ref:
+                page.views.append(build_chart_view(client_ref[0], page))
             else:
                 asyncio.create_task(page.push_route("/"))
                 return

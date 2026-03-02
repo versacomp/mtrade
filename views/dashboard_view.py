@@ -3,6 +3,8 @@
 import asyncio
 import flet as ft
 
+from views.nav import nav_app_bar
+
 
 def build_dashboard_view(client, page: ft.Page) -> ft.View:
     """Build dashboard with market charts for S&P, Nasdaq, Dow."""
@@ -133,17 +135,7 @@ def build_dashboard_view(client, page: ft.Page) -> ft.View:
     return ft.View(
         route="/dashboard",
         controls=[
-            ft.AppBar(
-                title=ft.Text("MTrade Dashboard"),
-                actions=[
-                    ft.Text(username, size=14),
-                    ft.IconButton(
-                        ft.Icons.LOGOUT,
-                        tooltip="Sign out",
-                        on_click=lambda _: asyncio.create_task(page.push_route("/")) or page.update(),
-                    ),
-                ],
-            ),
+            nav_app_bar(page, "MTrade Dashboard", "/dashboard", username),
             ft.SafeArea(
                 content=ft.Column(
                     [
