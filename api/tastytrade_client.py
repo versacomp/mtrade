@@ -144,3 +144,47 @@ class TastytradeClient:
                 if item.get("symbol") == symbol:
                     return item
         return {}
+
+    def get_candle_history(self, symbol: str, n_minutes: int = 240) -> list[dict]:
+        """
+        Fetch historical 1-minute OHLCV candles for a symbol.
+
+        Returns list of dicts with keys: timestamp, open, high, low, close.
+        Returns empty list if the API does not support the endpoint.
+        """
+        end_ts = int(time.time())
+        start_ts = end_ts - n_minutes * 60
+
+        # Pattern 1: tastytrade candle history endpoint
+        try:
+            data = self._get(
+                f"/market-data/candles/{symbol}/history",
+                params={"period": "1m", "start-time": start_ts, "end-time": end_ts},
+            )
+            candles = data.get("data", {}).get("candles", [])
+            if candles:
+                return candles
+        except Exception:
+            pass
+
+        # Pattern 2: market-data history (TD Ameritrade-style params)
+        try:
+            data = self._get(
+                "/market-data/history",
+                params={
+                    "symbol": symbol,
+                    "period-type": "day",
+                    "period": 1,
+                    "frequency-type": "minute",
+                    "frequency": 1,
+                    "start-date": start_ts * 1000,
+                    "end-date": end_ts * 1000,
+                },
+            )
+            candles = data.get("candles", []) or data.get("data", {}).get("candles", [])
+            if candles:
+                return candles
+        except Exception:
+            pass
+
+        return []

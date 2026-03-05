@@ -11,6 +11,7 @@ import flet as ft
 
 from views.chart_view import build_chart_view
 from views.dashboard_view import build_dashboard_view
+from views.institutional_liquidity_view import build_institutional_liquidity_view
 from views.login_view import build_login_view
 
 
@@ -70,6 +71,12 @@ def main(page: ft.Page) -> None:
         elif troute.match("/chart"):
             if client_ref:
                 page.views.append(build_chart_view(client_ref[0], page))
+            else:
+                asyncio.create_task(page.push_route("/"))
+                return
+        elif troute.match("/liquidity"):
+            if client_ref:
+                page.views.append(build_institutional_liquidity_view(client_ref[0], page))
             else:
                 asyncio.create_task(page.push_route("/"))
                 return

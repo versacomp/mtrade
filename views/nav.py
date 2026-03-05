@@ -22,6 +22,10 @@ def nav_app_bar(
                 "Chart",
                 on_click=lambda _: asyncio.create_task(page.push_route("/chart")),
             ),
+            ft.TextButton(
+                "Liquidity",
+                on_click=lambda _: asyncio.create_task(page.push_route("/liquidity")),
+            ),
             ft.Container(width=8),
             ft.Text(username, size=14),
             ft.IconButton(
