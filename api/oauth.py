@@ -10,11 +10,14 @@ https://my.tastytrade.com/app.html#/manage/api-access/oauth-applications
 For sandbox: Use credentials from https://developer.tastytrade.com/sandbox/
 """
 
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any
 
 import requests
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -75,6 +78,7 @@ class TastytradeOAuth:
         ]
 
         for url, payload in endpoints_to_try:
+            log.debug("OAuth token exchange → POST %s", url)
             try:
                 response = requests.post(
                     url,
@@ -82,12 +86,21 @@ class TastytradeOAuth:
                     headers={"Content-Type": "application/json"},
                     timeout=30,
                 )
+                log.debug("OAuth token exchange ← %s %s | %s", response.status_code, response.reason, url)
                 response.raise_for_status()
                 data = response.json()
-                return self._parse_token_response(data)
-            except requests.RequestException:
+                token = self._parse_token_response(data)
+                log.info("OAuth token exchange OK — user=%s", token.user.get("username", "?"))
+                return token
+            except requests.HTTPError as exc:
+                body = exc.response.text[:300] if exc.response is not None else ""
+                log.warning("OAuth token exchange ✗ %s | %s | %s", exc.response.status_code, url, body)
+                continue
+            except requests.RequestException as exc:
+                log.warning("OAuth token exchange ✗ network error | %s | %s", url, exc)
                 continue
 
+        log.error("OAuth token exchange — all endpoints failed. Check credentials and base URL.")
         raise ValueError(
             "Failed to exchange refresh token. Verify OAuth credentials and API base URL."
         )
@@ -114,18 +127,27 @@ def login_with_password(base_url: str, login: str, password: str) -> TokenRespon
     Uses POST /sessions per https://developer.tastytrade.com/basic-api-usage
     """
     url = f"{base_url.rstrip('/')}/sessions"
-    response = requests.post(
-        url,
-        json={"login": login, "password": password, "remember-me": True},
-        headers={"Content-Type": "application/json"},
-        timeout=30,
-    )
-    response.raise_for_status()
+    log.debug("login_with_password → POST %s | user=%s", url, login)
+    try:
+        response = requests.post(
+            url,
+            json={"login": login, "password": password, "remember-me": True},
+            headers={"Content-Type": "application/json"},
+            timeout=30,
+        )
+        log.debug("login_with_password ← %s %s", response.status_code, response.reason)
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        body = exc.response.text[:300] if exc.response is not None else ""
+        log.error("login_with_password ✗ %s | %s", exc.response.status_code, body)
+        raise
     data = response.json()
     inner = data.get("data", data)
     session_token = inner.get("session-token")
     user = inner.get("user", {})
     if not session_token:
+        log.error("login_with_password — no session-token in response: %s", str(data)[:300])
         raise ValueError("No session token in response")
+    log.info("login_with_password OK — user=%s", user.get("username", "?"))
     expires_at = time.time() + TastytradeOAuth.SESSION_DURATION_SECONDS
     return TokenResponse(session_token=session_token, user=user, expires_at=expires_at)

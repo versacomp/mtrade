@@ -5,12 +5,15 @@ Consumes REST services at api.cert.tastyworks.com (sandbox) per:
 https://developer.tastytrade.com/api-overview/
 """
 
+import logging
 import time
 from typing import Any
 
 import requests
 
 from api.oauth import TastytradeOAuth, TokenResponse, login_with_password
+
+log = logging.getLogger(__name__)
 
 
 class TastytradeClient:
@@ -45,12 +48,15 @@ class TastytradeClient:
         if self._oauth and (
             not self._session_token or time.time() >= self._token_expires_at
         ):
+            log.debug("Token expired or missing — refreshing via OAuth")
             token_resp = self._oauth.exchange_refresh_token()
             self._session_token = token_resp.session_token
             self._token_expires_at = token_resp.expires_at or 0.0
             self._user = token_resp.user
+            log.info("Token refreshed — expires at %.0f", self._token_expires_at)
 
         if not self._session_token:
+            log.error("No session token available — not authenticated")
             raise ValueError("Not authenticated. Use OAuth credentials or login().")
 
         return self._session_token
@@ -80,15 +86,35 @@ class TastytradeClient:
 
     def _get(self, path: str, params: dict | None = None) -> dict[str, Any]:
         url = f"{self.base_url}{path}"
-        r = requests.get(url, headers=self._headers(), params=params, timeout=30)
-        r.raise_for_status()
-        return r.json()
+        log.debug("GET → %s | params=%s", url, params)
+        try:
+            r = requests.get(url, headers=self._headers(), params=params, timeout=30)
+            log.debug("GET ← %s %s | %s", r.status_code, r.reason, url)
+            r.raise_for_status()
+            return r.json()
+        except requests.HTTPError as exc:
+            body = exc.response.text[:500] if exc.response is not None else ""
+            log.error("GET ✗ %s | %s | %s", exc.response.status_code, url, body)
+            raise
+        except requests.RequestException as exc:
+            log.error("GET ✗ network error | %s | %s", url, exc)
+            raise
 
     def _post(self, path: str, json: dict | None = None) -> dict[str, Any]:
         url = f"{self.base_url}{path}"
-        r = requests.post(url, headers=self._headers(), json=json, timeout=30)
-        r.raise_for_status()
-        return r.json()
+        log.debug("POST → %s | body=%s", url, json)
+        try:
+            r = requests.post(url, headers=self._headers(), json=json, timeout=30)
+            log.debug("POST ← %s %s | %s", r.status_code, r.reason, url)
+            r.raise_for_status()
+            return r.json()
+        except requests.HTTPError as exc:
+            body = exc.response.text[:500] if exc.response is not None else ""
+            log.error("POST ✗ %s | %s | %s", exc.response.status_code, url, body)
+            raise
+        except requests.RequestException as exc:
+            log.error("POST ✗ network error | %s | %s", url, exc)
+            raise
 
     @property
     def user(self) -> dict[str, Any]:
@@ -119,19 +145,21 @@ class TastytradeClient:
         """
         if not symbols:
             return {}
-        # tastytrade market data: symbols as query param
         symbols_param = ",".join(symbols)
         path = f"/market-metrics/equity-futures-options?symbols={symbols_param}"
         try:
             data = self._get(path)
+            log.debug("get_market_quotes OK — symbols=%s", symbols)
             return data.get("data", data)
         except requests.HTTPError:
-            # Fallback: some APIs use different paths
+            log.warning("get_market_quotes primary path failed — trying fallback")
             try:
                 path = f"/market-metrics/quotes?symbols={symbols_param}"
                 data = self._get(path)
+                log.debug("get_market_quotes fallback OK — symbols=%s", symbols)
                 return data.get("data", data)
             except requests.HTTPError:
+                log.error("get_market_quotes both paths failed — symbols=%s", symbols)
                 return {}
 
     def get_quote(self, symbol: str) -> dict:
@@ -145,6 +173,17 @@ class TastytradeClient:
                     return item
         return {}
 
+    def get_quote_token(self) -> dict:
+        """
+        GET /api-quote-tokens — retrieve a DXLink streaming token.
+
+        Returns dict with keys: token, dxlink-url (and optionally websocket-url,
+        level, streamer-token) per:
+        https://developer.tastytrade.com/streaming-market-data/#get-api-quote-tokens
+        """
+        data = self._get("/api-quote-tokens")
+        return data.get("data", data)
+
     def get_candle_history(self, symbol: str, n_minutes: int = 240) -> list[dict]:
         """
         Fetch historical 1-minute OHLCV candles for a symbol.
@@ -155,6 +194,11 @@ class TastytradeClient:
         end_ts = int(time.time())
         start_ts = end_ts - n_minutes * 60
 
+        log.debug(
+            "get_candle_history — symbol=%s n_minutes=%d start=%d end=%d",
+            symbol, n_minutes, start_ts, end_ts,
+        )
+
         # Pattern 1: tastytrade candle history endpoint
         try:
             data = self._get(
@@ -163,9 +207,11 @@ class TastytradeClient:
             )
             candles = data.get("data", {}).get("candles", [])
             if candles:
+                log.info("get_candle_history pattern-1 OK — %d candles for %s", len(candles), symbol)
                 return candles
-        except Exception:
-            pass
+            log.warning("get_candle_history pattern-1 returned empty candles for %s", symbol)
+        except Exception as exc:
+            log.warning("get_candle_history pattern-1 failed for %s — %s", symbol, exc)
 
         # Pattern 2: market-data history (TD Ameritrade-style params)
         try:
@@ -183,8 +229,11 @@ class TastytradeClient:
             )
             candles = data.get("candles", []) or data.get("data", {}).get("candles", [])
             if candles:
+                log.info("get_candle_history pattern-2 OK — %d candles for %s", len(candles), symbol)
                 return candles
-        except Exception:
-            pass
+            log.warning("get_candle_history pattern-2 returned empty candles for %s", symbol)
+        except Exception as exc:
+            log.warning("get_candle_history pattern-2 failed for %s — %s", symbol, exc)
 
+        log.error("get_candle_history — all patterns failed for %s, falling back to demo", symbol)
         return []
