@@ -59,11 +59,14 @@ class DXLinkStreamer:
         Runs until the enclosing asyncio Task is cancelled, or the connection
         drops (raises ConnectionError in that case so the caller can fall back).
         """
+        # symbol should already be the full streamer-symbol (e.g. /MESU26:XCME)
+        # Append the 1-minute candle aggregation suffix
         dxlink_symbol = f"{symbol}{{=1m}}"
         log.info("DXLink connecting — symbol=%s url=%s", dxlink_symbol, self.dxlink_url)
 
         field_order: list[str] = []
-        auth_sent = False
+        auth_sent  = False
+        subscribed = False  # guard against duplicate FEED_SUBSCRIPTION
         keepalive_task: asyncio.Task | None = None
 
         try:
@@ -151,33 +154,45 @@ class DXLinkStreamer:
                         log.debug("DXLink → FEED_SETUP")
 
                     elif msg_type == "FEED_CONFIG":
+                        # Server sends FEED_CONFIG twice:
+                        #   1st — in response to FEED_SETUP (send subscription here)
+                        #   2nd — to acknowledge FEED_SUBSCRIPTION (skip)
                         event_fields = msg.get("eventFields", {})
-                        field_order = event_fields.get("Candle") or [
-                            "eventSymbol", "time",
-                            "open", "high", "low", "close", "volume",
-                        ]
+                        new_fields   = event_fields.get("Candle")
+                        if new_fields:
+                            field_order = new_fields
                         log.info("DXLink FEED_CONFIG Candle fields: %s", field_order)
 
-                        await ws.send(json.dumps({
-                            "type": "FEED_SUBSCRIPTION",
-                            "channel": self.CHANNEL_ID,
-                            "add": [{
-                                "type": "Candle",
-                                "symbol": dxlink_symbol,
-                                "fromTime": from_time_ms,
-                            }],
-                        }))
-                        log.info(
-                            "DXLink → FEED_SUBSCRIPTION symbol=%s fromTime=%d",
-                            dxlink_symbol, from_time_ms,
-                        )
-
-                        if keepalive_task is None:
-                            keepalive_task = asyncio.create_task(_keepalive_loop())
+                        if not subscribed:
+                            subscribed = True
+                            if not field_order:
+                                field_order = [
+                                    "eventSymbol", "time",
+                                    "open", "high", "low", "close", "volume",
+                                ]
+                            await ws.send(json.dumps({
+                                "type": "FEED_SUBSCRIPTION",
+                                "channel": self.CHANNEL_ID,
+                                "add": [{
+                                    "type": "Candle",
+                                    "symbol": dxlink_symbol,
+                                    "fromTime": from_time_ms,
+                                }],
+                            }))
+                            log.info(
+                                "DXLink → FEED_SUBSCRIPTION symbol=%s fromTime=%d",
+                                dxlink_symbol, from_time_ms,
+                            )
+                            if keepalive_task is None:
+                                keepalive_task = asyncio.create_task(_keepalive_loop())
+                        else:
+                            log.debug("DXLink: ignoring duplicate FEED_CONFIG (subscription ack)")
 
                     elif msg_type == "FEED_DATA":
+                        raw_data = msg.get("data", [])
+                        log.debug("DXLink FEED_DATA raw: %s", str(raw_data)[:300])
                         if field_order:
-                            self._parse_compact(msg.get("data", []), field_order, on_candle)
+                            self._parse_compact(raw_data, field_order, on_candle)
                         else:
                             log.warning("DXLink: FEED_DATA before FEED_CONFIG — skipping")
 

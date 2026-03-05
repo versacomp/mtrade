@@ -7,6 +7,7 @@ https://developer.tastytrade.com/api-overview/
 
 import logging
 import time
+from datetime import date
 from typing import Any
 
 import requests
@@ -172,6 +173,49 @@ class TastytradeClient:
                 if item.get("symbol") == symbol:
                     return item
         return {}
+
+    def get_futures_streamer_symbol(self, underlying: str) -> str:
+        """
+        Look up the front-month futures streamer-symbol for DXLink subscription.
+
+        Calls GET /instruments/futures?product-code={code} and returns the
+        nearest-expiry active contract's streamer-symbol (e.g. '/MESU26:XCME').
+        Falls back to '/{underlying}' on any error so streaming can still attempt.
+        """
+        product_code = underlying.upper().lstrip("/")
+        try:
+            data  = self._get("/instruments/futures", params={"product-code": product_code})
+            items = data.get("data", {}).get("items", [])
+            if not items:
+                log.warning("get_futures_streamer_symbol: no contracts for %s", product_code)
+                return f"/{product_code}"
+
+            today = date.today()
+            candidates: list[tuple[date, str]] = []
+            for item in items:
+                sym = item.get("streamer-symbol", "")
+                exp = item.get("expiration-date", "")
+                if not sym or not exp:
+                    continue
+                try:
+                    exp_date = date.fromisoformat(exp)
+                    if exp_date >= today:
+                        candidates.append((exp_date, sym))
+                except ValueError:
+                    continue
+
+            if not candidates:
+                log.warning("get_futures_streamer_symbol: no active contracts for %s", product_code)
+                return f"/{product_code}"
+
+            candidates.sort(key=lambda x: x[0])
+            front_month_sym = candidates[0][1]
+            log.info("Futures streamer-symbol: %s → %s", product_code, front_month_sym)
+            return front_month_sym
+
+        except Exception as exc:
+            log.warning("get_futures_streamer_symbol failed for %s: %s", product_code, exc)
+            return f"/{product_code}"
 
     def get_quote_token(self) -> dict:
         """

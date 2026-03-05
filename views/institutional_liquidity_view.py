@@ -314,23 +314,26 @@ def detect_signals(candles: list[Candle]) -> list[Signal]:
 
 # ── Chart builder ──────────────────────────────────────────────────────────────
 def _build_chart(
-    candles: list[Candle],
-    sma50:   list[Optional[float]],
-    sma200:  list[Optional[float]],
-    signals: list[Signal],
+    candles:   list[Candle],
+    sma50:     list[Optional[float]],
+    sma200:    list[Optional[float]],
+    signals:   list[Signal],
+    chart_w:   int = CHART_W,
+    chart_h:   int = CHART_H,
+    n_visible: int = VISIBLE_CANDLES,
 ) -> ft.Control:
     """Render the dark candlestick canvas with SMA lines and signal arrows."""
 
     if not candles:
         return ft.Container(
-            width=CHART_W, height=CHART_H, bgcolor=COL_BG,
+            width=chart_w, height=chart_h, bgcolor=COL_BG,
             content=ft.Text("No data yet", color=COL_LABEL),
             alignment=ft.Alignment(0, 0),
         )
 
-    visible    = candles[-VISIBLE_CANDLES:]
-    vis_sma50  = (sma50  or [])[-VISIBLE_CANDLES:]
-    vis_sma200 = (sma200 or [])[-VISIBLE_CANDLES:]
+    visible    = candles[-n_visible:]
+    vis_sma50  = (sma50  or [])[-n_visible:]
+    vis_sma200 = (sma200 or [])[-n_visible:]
     buf_offset = len(candles) - len(visible)
 
     all_prices: list[float] = []
@@ -347,7 +350,7 @@ def _build_chart(
     pad        = (mx - mn) * 0.08 or 2.0
     mn -= pad;  mx += pad
     price_range = mx - mn
-    plot_h      = CHART_H - PAD_TOP - PAD_BOTTOM
+    plot_h      = chart_h - PAD_TOP - PAD_BOTTOM
 
     def py(price: float) -> float:
         return PAD_TOP + plot_h * (mx - price) / price_range
@@ -359,7 +362,7 @@ def _build_chart(
 
     # Background
     shapes.append(cv.Rect(
-        x=0, y=0, width=CHART_W, height=CHART_H,
+        x=0, y=0, width=chart_w, height=chart_h,
         paint=ft.Paint(color=COL_BG, style=ft.PaintingStyle.FILL),
     ))
 
@@ -368,7 +371,7 @@ def _build_chart(
         level = mn + price_range * gi / 5
         y = py(level)
         shapes.append(cv.Line(
-            x1=PAD_LEFT, y1=y, x2=CHART_W - PAD_RIGHT, y2=y,
+            x1=PAD_LEFT, y1=y, x2=chart_w - PAD_RIGHT, y2=y,
             paint=ft.Paint(color=COL_GRID, stroke_width=0.5),
         ))
         shapes.append(cv.Text(
@@ -381,7 +384,7 @@ def _build_chart(
         if i == 0 or i % 30 == 0 or i == len(visible) - 1:
             label = datetime.fromtimestamp(c.timestamp).strftime("%H:%M")
             shapes.append(cv.Text(
-                x=cx(i) - 13, y=CHART_H - PAD_BOTTOM + 5,
+                x=cx(i) - 13, y=chart_h - PAD_BOTTOM + 5,
                 spans=[ft.TextSpan(label, style=ft.TextStyle(size=8, color=COL_LABEL))],
             ))
 
@@ -469,7 +472,7 @@ def _build_chart(
                 spans=[ft.TextSpan("SMA 200", style=ft.TextStyle(size=9, color=COL_SMA200))]),
     ]
 
-    return cv.Canvas(shapes=shapes, width=CHART_W, height=CHART_H)
+    return cv.Canvas(shapes=shapes, width=chart_w, height=chart_h)
 
 
 def _symbol_desc(sym: str) -> str:
@@ -491,7 +494,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
     # ── UI refs ───────────────────────────────────────────────────────────────
     chart_container_ref = ft.Ref[ft.Container]()
-    chart_row_ref       = ft.Ref[ft.Row]()
+    chart_area_ref      = ft.Ref[ft.Container]()
     price_ref           = ft.Ref[ft.Text]()
     signal_ref          = ft.Ref[ft.Text]()
     status_ref          = ft.Ref[ft.Text]()
@@ -500,6 +503,20 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
     demo_banner_ref     = ft.Ref[ft.Container]()
     chip_row_ref        = ft.Ref[ft.Container]()
     symbol_field_ref    = ft.Ref[ft.TextField]()
+
+    # ── Dynamic chart dimensions ───────────────────────────────────────────────
+    # Overhead: AppBar ~56px + padding 32px + header 70px + picker 40px +
+    #           spacing 50px + legend 28px + status 20px ≈ 296px
+    _OVERHEAD = 296
+
+    def _get_chart_dims() -> tuple[int, int, int]:
+        """Return (chart_w, chart_h, n_visible) based on current page size."""
+        pw = max(480, int(page.width or 800))
+        ph = max(400, int(page.height or 600))
+        cw = pw - 32   # 16px padding each side
+        ch = max(200, ph - _OVERHEAD)
+        nv = max(20, (cw - PAD_LEFT - PAD_RIGHT) // CANDLE_STEP)
+        return cw, ch, nv
 
     # ── Cache helpers ─────────────────────────────────────────────────────────
     def _state() -> SymbolState:
@@ -536,6 +553,28 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             padding=ft.padding.symmetric(horizontal=12, vertical=8),
         )
 
+    # ── Resize-only update ────────────────────────────────────────────────────
+    def _rebuild_chart_dims() -> None:
+        """Recompute chart dimensions and redraw canvas.  Safe to call with no data."""
+        chart_w, chart_h, n_visible = _get_chart_dims()
+
+        if chart_area_ref.current:
+            chart_area_ref.current.height = chart_h + 4
+            chart_area_ref.current.update()
+
+        state   = _state()
+        candles = list(state.buffer)
+        if chart_container_ref.current:
+            sma50   = _compute_sma(candles, 50)   if candles else []
+            sma200  = _compute_sma(candles, 200)  if candles else []
+            signals = detect_signals(candles)     if candles else []
+            chart_container_ref.current.content = _build_chart(
+                candles, sma50, sma200, signals, chart_w, chart_h, n_visible,
+            )
+            chart_container_ref.current.update()
+
+        page.update()
+
     # ── UI update ─────────────────────────────────────────────────────────────
     def _update_ui() -> None:
         sym     = active_symbol[0]
@@ -548,10 +587,19 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         sma200  = _compute_sma(candles, 200)
         signals = detect_signals(candles)
 
-        # Chart
+        chart_w, chart_h, n_visible = _get_chart_dims()
+
+        # Chart canvas
         if chart_container_ref.current:
-            chart_container_ref.current.content = _build_chart(candles, sma50, sma200, signals)
+            chart_container_ref.current.content = _build_chart(
+                candles, sma50, sma200, signals, chart_w, chart_h, n_visible,
+            )
             chart_container_ref.current.update()
+
+        # Chart area height (tracks dynamic chart_h)
+        if chart_area_ref.current:
+            chart_area_ref.current.height = chart_h + 4
+            chart_area_ref.current.update()
 
         # Price
         if price_ref.current:
@@ -597,10 +645,6 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
                 f"4h buffer  ·  1m"
             )
             status_ref.current.update()
-
-        # Scroll chart right to newest candles
-        if chart_row_ref.current:
-            chart_row_ref.current.scroll_to(offset=CHART_W, duration=150)
 
         page.update()
 
@@ -697,6 +741,10 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             if not token or not dxlink_url:
                 raise ValueError(f"Missing token/URL in quote token response: {token_data}")
 
+            # Look up the exact DXLink streamer-symbol (e.g. /MESU26:XCME)
+            streamer_sym = client.get_futures_streamer_symbol(sym)
+            log.info("DXLink streamer-symbol for %s → %s", sym, streamer_sym)
+
             from_time_ms = int((time.time() - BUFFER_MINUTES * 60) * 1000)
             streamer     = DXLinkStreamer(dxlink_url, token)
 
@@ -705,14 +753,13 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             state.demo_mode = False
             _refresh_demo_banner()
 
-            log.info("Starting DXLink stream for %s", sym)
             live_ok = True
 
             def on_candle(candle_dict: dict) -> None:
                 _process_candle_event(sym, candle_dict)
 
             await streamer.stream_candles(
-                symbol=sym,
+                symbol=streamer_sym,
                 from_time_ms=from_time_ms,
                 on_candle=on_candle,
             )
@@ -823,7 +870,11 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
     task = asyncio.create_task(_stream_loop())
     stream_task[0] = task
 
+    # Wire up resize handler — rebuilds chart dimensions whenever window changes
+    page.on_resized = lambda _: _rebuild_chart_dims()
+
     # Initial display — buffer is empty until DXLink delivers first candles
+    init_chart_w, init_chart_h, init_n_visible = _get_chart_dims()
     candles_init = list(_state().buffer)
     sma50_init   = _compute_sma(candles_init, 50)
     sma200_init  = _compute_sma(candles_init, 200)
@@ -888,19 +939,17 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         wrap=False,
     )
 
-    # Chart area
+    # Chart area — height tracks page height dynamically via _update_ui / on_resized
     chart_area = ft.Container(
-        content=ft.Row(
-            ref=chart_row_ref,
-            controls=[
-                ft.Container(
-                    ref=chart_container_ref,
-                    content=_build_chart(candles_init, sma50_init, sma200_init, signals_init),
-                )
-            ],
-            scroll=ft.ScrollMode.AUTO,
+        ref=chart_area_ref,
+        content=ft.Container(
+            ref=chart_container_ref,
+            content=_build_chart(
+                candles_init, sma50_init, sma200_init, signals_init,
+                init_chart_w, init_chart_h, init_n_visible,
+            ),
         ),
-        height=CHART_H + 4,
+        height=init_chart_h + 4,
         bgcolor=COL_BG,
         border_radius=8,
         clip_behavior=ft.ClipBehavior.HARD_EDGE,
