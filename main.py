@@ -7,6 +7,8 @@ API Overview: https://developer.tastytrade.com/api-overview/
 """
 
 import asyncio
+import logging
+import logging.handlers
 import flet as ft
 
 from views.chart_view import build_chart_view
@@ -15,8 +17,40 @@ from views.institutional_liquidity_view import build_institutional_liquidity_vie
 from views.login_view import build_login_view
 
 
+def _configure_logging() -> None:
+    """
+    Route all api.* logs to console and a rolling file (mtrade_api.log).
+    Level: DEBUG — captures every request, response status, and error body.
+    """
+    fmt = logging.Formatter(
+        fmt="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    console = logging.StreamHandler()
+    console.setFormatter(fmt)
+
+    # 5 MB rolling log, keep last 3 files
+    file_handler = logging.handlers.RotatingFileHandler(
+        "mtrade_api.log",
+        maxBytes=5 * 1024 * 1024,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(fmt)
+
+    # Only configure the api.* namespace to avoid Flet framework noise
+    api_log = logging.getLogger("api")
+    api_log.setLevel(logging.DEBUG)
+    if not api_log.handlers:
+        api_log.addHandler(console)
+        api_log.addHandler(file_handler)
+    api_log.propagate = False
+
+
 def main(page: ft.Page) -> None:
     """MTrade main app entry point."""
+    _configure_logging()
     page.title = "MTrade"
     page.theme_mode = ft.ThemeMode.SYSTEM
     page.padding = 0
