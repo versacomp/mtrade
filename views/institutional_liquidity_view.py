@@ -8,6 +8,7 @@ and arrow signals.
 """
 
 import asyncio
+import logging
 import random
 import time
 from collections import deque
@@ -18,7 +19,10 @@ from typing import Optional
 import flet as ft
 import flet.canvas as cv
 
+from api.dxlink_streamer import DXLinkStreamer
 from views.nav import nav_app_bar
+
+log = logging.getLogger(__name__)
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 DEFAULT_SYMBOL = "MES"
@@ -26,15 +30,83 @@ DEFAULT_SYMBOL = "MES"
 # Quick-access chips shown in the picker bar
 QUICK_SYMBOLS = ["MES", "MNQ", "M2K", "MYM", "MGC"]
 
-# Demo base prices keyed by common symbol names (upper-case, slash stripped)
-DEMO_BASES: dict[str, float] = {
-    "MES": 5220.0,  "ES":  5220.0,
-    "MNQ": 18200.0, "NQ":  18200.0,
-    "MYM": 38500.0, "YM":  38500.0,
-    "M2K": 2100.0,  "RTY": 2100.0,
-    "MGC": 2620.0,  "GC":  2620.0,
-    "MCL": 75.0,    "CL":  75.0,
-}
+# ── Futures instrument registry ────────────────────────────────────────────────
+# Single source of truth for all supported futures instruments.
+# symbol    – canonical code, upper-case, no leading slash
+# desc      – human-readable full name
+# base      – approximate current price used for demo-mode candle generation
+# sector    – instrument category
+
+from dataclasses import dataclass as _dc
+
+@_dc(frozen=True)
+class FuturesInstrument:
+    symbol: str
+    desc:   str
+    base:   float
+    sector: str
+
+
+def _reg(*args) -> tuple[str, "FuturesInstrument"]:
+    inst = FuturesInstrument(*args)
+    return inst.symbol, inst
+
+
+FUTURES_REGISTRY: dict[str, FuturesInstrument] = dict([
+    # ── Equity Index ────────────────────────────────────────────────────────
+    _reg("MES",  "Micro E-mini S&P 500",          5220.0,   "Equity Index"),
+    _reg("ES",   "E-mini S&P 500",                5220.0,   "Equity Index"),
+    _reg("MNQ",  "Micro E-mini Nasdaq-100",       18200.0,  "Equity Index"),
+    _reg("NQ",   "E-mini Nasdaq-100",             18200.0,  "Equity Index"),
+    _reg("MYM",  "Micro E-mini Dow Jones",        38500.0,  "Equity Index"),
+    _reg("YM",   "E-mini Dow Jones",              38500.0,  "Equity Index"),
+    _reg("M2K",  "Micro E-mini Russell 2000",      2100.0,  "Equity Index"),
+    _reg("RTY",  "E-mini Russell 2000",            2100.0,  "Equity Index"),
+    # ── Metals ──────────────────────────────────────────────────────────────
+    _reg("MGC",  "Micro Gold",                     2620.0,  "Metals"),
+    _reg("GC",   "Gold",                           2620.0,  "Metals"),
+    _reg("MSI",  "Micro Silver",                     30.5,  "Metals"),
+    _reg("SI",   "Silver",                           30.5,  "Metals"),
+    _reg("HG",   "Copper",                            4.5,  "Metals"),
+    _reg("PL",   "Platinum",                        960.0,  "Metals"),
+    _reg("PA",   "Palladium",                      1000.0,  "Metals"),
+    # ── Energy ──────────────────────────────────────────────────────────────
+    _reg("MCL",  "Micro Crude Oil (WTI)",            75.0,  "Energy"),
+    _reg("CL",   "Crude Oil (WTI)",                  75.0,  "Energy"),
+    _reg("NG",   "Natural Gas",                       2.5,  "Energy"),
+    _reg("HO",   "Heating Oil",                       2.6,  "Energy"),
+    _reg("RB",   "RBOB Gasoline",                     2.4,  "Energy"),
+    # ── Interest Rates ──────────────────────────────────────────────────────
+    _reg("ZB",   "30-Year U.S. T-Bond",             115.0,  "Rates"),
+    _reg("ZN",   "10-Year U.S. T-Note",             109.0,  "Rates"),
+    _reg("ZF",   "5-Year U.S. T-Note",              107.0,  "Rates"),
+    _reg("ZT",   "2-Year U.S. T-Note",              102.0,  "Rates"),
+    _reg("SR3",  "3-Month SOFR",                      94.8,  "Rates"),
+    # ── FX ──────────────────────────────────────────────────────────────────
+    _reg("6E",   "Euro FX",                           1.08,  "FX"),
+    _reg("6J",   "Japanese Yen",                    0.0067,  "FX"),
+    _reg("6B",   "British Pound",                     1.27,  "FX"),
+    _reg("6A",   "Australian Dollar",                 0.65,  "FX"),
+    _reg("6C",   "Canadian Dollar",                   0.74,  "FX"),
+    _reg("6S",   "Swiss Franc",                       1.12,  "FX"),
+    _reg("6N",   "New Zealand Dollar",                0.60,  "FX"),
+    _reg("6M",   "Mexican Peso",                     0.058,  "FX"),
+    # ── Agricultural ────────────────────────────────────────────────────────
+    _reg("ZC",   "Corn",                             430.0,  "Ag"),
+    _reg("ZW",   "Wheat (SRW)",                      550.0,  "Ag"),
+    _reg("ZS",   "Soybeans",                        1000.0,  "Ag"),
+    _reg("ZM",   "Soybean Meal",                     310.0,  "Ag"),
+    _reg("ZL",   "Soybean Oil",                       44.0,  "Ag"),
+    _reg("ZO",   "Oats",                             370.0,  "Ag"),
+    _reg("KC",   "Coffee",                           195.0,  "Ag"),
+    _reg("CT",   "Cotton",                            82.0,  "Ag"),
+    _reg("SB",   "Sugar #11",                         20.0,  "Ag"),
+    _reg("CC",   "Cocoa",                           8500.0,  "Ag"),
+    # ── Livestock ───────────────────────────────────────────────────────────
+    _reg("LE",   "Live Cattle",                      190.0,  "Livestock"),
+    _reg("GF",   "Feeder Cattle",                    270.0,  "Livestock"),
+    _reg("HE",   "Lean Hogs",                         85.0,  "Livestock"),
+])
 
 POLL_INTERVAL  = 60    # seconds between polls
 BUFFER_MINUTES = 240   # 4-hour candle buffer per symbol
@@ -94,6 +166,7 @@ class SymbolState:
     min_start:    float = 0.0
     demo_mode:    bool  = False
     last_sig_key: tuple = ()
+    last_update:  float = 0.0  # Unix timestamp of last UI update (throttle)
 
 
 # Module-level symbol cache – persists across symbol switches within a session
@@ -102,8 +175,9 @@ _symbol_cache: dict[str, SymbolState] = {}
 
 # ── Demo data ──────────────────────────────────────────────────────────────────
 def _demo_base(symbol: str) -> float:
-    key = symbol.upper().lstrip("/")
-    return DEMO_BASES.get(key, 100.0)
+    key  = symbol.upper().lstrip("/")
+    inst = FUTURES_REGISTRY.get(key)
+    return inst.base if inst else 100.0
 
 
 def _generate_demo_candles(symbol: str, n: int = BUFFER_MINUTES) -> list[Candle]:
@@ -251,7 +325,7 @@ def _build_chart(
         return ft.Container(
             width=CHART_W, height=CHART_H, bgcolor=COL_BG,
             content=ft.Text("No data yet", color=COL_LABEL),
-            alignment=ft.alignment.center,
+            alignment=ft.Alignment(0, 0),
         )
 
     visible    = candles[-VISIBLE_CANDLES:]
@@ -398,6 +472,13 @@ def _build_chart(
     return cv.Canvas(shapes=shapes, width=CHART_W, height=CHART_H)
 
 
+def _symbol_desc(sym: str) -> str:
+    """Return the human-readable description for a futures instrument, or empty string."""
+    key  = sym.upper().lstrip("/")
+    inst = FUTURES_REGISTRY.get(key)
+    return inst.desc if inst else ""
+
+
 # ── Main view builder ──────────────────────────────────────────────────────────
 def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
     """Institutional Liquidity view with per-symbol caching and picker."""
@@ -405,8 +486,8 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
     # ── Active symbol ─────────────────────────────────────────────────────────
     active_symbol: list[str] = [DEFAULT_SYMBOL]
 
-    # ── Polling control ───────────────────────────────────────────────────────
-    polling_stop = asyncio.Event()
+    # ── Stream task reference (cancel to stop/switch) ─────────────────────────
+    stream_task: list = [None]  # list[asyncio.Task | None]
 
     # ── UI refs ───────────────────────────────────────────────────────────────
     chart_container_ref = ft.Ref[ft.Container]()
@@ -415,6 +496,8 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
     signal_ref          = ft.Ref[ft.Text]()
     status_ref          = ft.Ref[ft.Text]()
     symbol_label_ref    = ft.Ref[ft.Text]()
+    desc_ref            = ft.Ref[ft.Text]()
+    demo_banner_ref     = ft.Ref[ft.Container]()
     chip_row_ref        = ft.Ref[ft.Container]()
     symbol_field_ref    = ft.Ref[ft.TextField]()
 
@@ -426,58 +509,32 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         return _symbol_cache[sym]
 
     def _load_for_symbol(sym: str) -> None:
-        """Populate the cache for `sym` if not already done."""
-        if sym in _symbol_cache and len(_symbol_cache[sym].buffer) > 0:
-            return  # already cached – nothing to do
+        """Ensure a SymbolState exists for sym.  Data is loaded by the stream loop."""
+        if sym not in _symbol_cache:
+            _symbol_cache[sym] = SymbolState()
 
-        state = SymbolState()
-        raw: list[dict] = []
-        try:
-            raw = client.get_candle_history(sym, n_minutes=BUFFER_MINUTES)
-        except Exception:
-            pass
-
-        if raw:
-            for c in _parse_api_candles(raw):
-                state.buffer.append(c)
-        else:
-            state.demo_mode = True
-            for c in _generate_demo_candles(sym):
-                state.buffer.append(c)
-
-        if state.buffer:
-            last = state.buffer[-1]
-            state.cur_open  = last.close
-            state.cur_high  = last.close
-            state.cur_low   = last.close
-            now = time.time()
-            state.min_start = now - (now % 60)
-
-        _symbol_cache[sym] = state
-
-    # ── Price fetch ───────────────────────────────────────────────────────────
-    def _get_price(sym: str) -> Optional[float]:
-        try:
-            raw = client.get_market_quotes([sym])
-            if isinstance(raw, dict) and sym in raw:
-                v = raw[sym]
-                if isinstance(v, dict):
-                    p = v.get("last-price") or v.get("last") or v.get("price")
-                    return float(p) if p is not None else None
-            if isinstance(raw, list):
-                for item in raw:
-                    s = item.get("symbol") or item.get("instrument-symbol")
-                    if s == sym:
-                        p = item.get("last-price") or item.get("last") or item.get("price")
-                        return float(p) if p is not None else None
-        except Exception:
-            pass
-        # Demo fallback: random walk from last cached candle
-        st = _symbol_cache.get(sym)
-        if st and st.buffer:
-            vol = max(0.25, _demo_base(sym) * 0.0001)
-            return round(st.buffer[-1].close + random.gauss(0, vol), 2)
-        return None
+    # ── Demo banner ───────────────────────────────────────────────────────────
+    def _demo_banner_widget(is_demo: bool) -> ft.Control:
+        if not is_demo:
+            return ft.Container(height=0)
+        return ft.Container(
+            content=ft.Row(
+                [
+                    ft.Icon(ft.Icons.WARNING_ROUNDED, color="#1C1917", size=16),
+                    ft.Text(
+                        "DEMO DATA  ·  API unavailable  ·  Prices are simulated",
+                        size=12,
+                        color="#1C1917",
+                        weight=ft.FontWeight.W_700,
+                    ),
+                ],
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor="#FBBF24",
+            border_radius=6,
+            padding=ft.padding.symmetric(horizontal=12, vertical=8),
+        )
 
     # ── UI update ─────────────────────────────────────────────────────────────
     def _update_ui() -> None:
@@ -532,7 +589,6 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
                 signal_ref.current.color = COL_LABEL
                 signal_ref.current.update()
 
-        # Status bar
         if status_ref.current:
             mode = "Demo" if state.demo_mode else "Live"
             ts   = datetime.fromtimestamp(candles[-1].timestamp).strftime("%H:%M")
@@ -548,17 +604,17 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
         page.update()
 
-    # ── Tick (called each poll) ───────────────────────────────────────────────
-    def _tick() -> None:
+    # ── Demo tick (used when DXLink unavailable) ──────────────────────────────
+    def _tick_demo() -> None:
+        """Advance a random-walk price candle for the current demo symbol."""
         sym   = active_symbol[0]
         state = _state()
-        now   = time.time()
-        price = _get_price(sym)
-        if price is None:
+        if not state.demo_mode or not state.buffer:
             return
-
+        now   = time.time()
+        vol   = max(0.25, _demo_base(sym) * 0.0001)
+        price = round(state.buffer[-1].close + random.gauss(0, vol), 2)
         current_min = now - (now % 60)
-
         if state.min_start == 0.0:
             state.min_start = current_min
             state.cur_open  = price
@@ -579,19 +635,115 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         else:
             state.cur_high = max(state.cur_high or price, price)
             state.cur_low  = min(state.cur_low  or price, price)
-
         _update_ui()
 
-    # ── Poll loop ─────────────────────────────────────────────────────────────
-    async def _poll_loop() -> None:
-        while not polling_stop.is_set():
-            try:
-                await asyncio.wait_for(polling_stop.wait(), timeout=float(POLL_INTERVAL))
-            except asyncio.TimeoutError:
-                pass
-            if polling_stop.is_set():
-                break
-            _tick()
+    # ── DXLink candle event handler ───────────────────────────────────────────
+    def _safe_float(v) -> Optional[float]:
+        """Convert a value to float, returning None for NaN / null / 0."""
+        if v is None:
+            return None
+        try:
+            f = float(v)
+            return None if f != f else f   # f != f is True only for NaN
+        except (TypeError, ValueError):
+            return None
+
+    def _process_candle_event(sym: str, candle_dict: dict) -> None:
+        """Process one Candle event from DXLink and update the buffer."""
+        if sym != active_symbol[0]:
+            return  # stale event from a previous symbol, ignore
+        state = _state()
+        try:
+            t_ms = float(candle_dict.get("time") or 0)
+            if t_ms <= 0:
+                return
+            t = t_ms / 1000.0
+            o = _safe_float(candle_dict.get("open"))
+            h = _safe_float(candle_dict.get("high"))
+            l = _safe_float(candle_dict.get("low"))
+            c = _safe_float(candle_dict.get("close"))
+            if not all(v is not None and v > 0 for v in (o, h, l, c)):
+                return  # skip NaN / in-flight zero candles
+        except (TypeError, ValueError):
+            return
+
+        candle = Candle(timestamp=t, open=o, high=h, low=l, close=c)
+
+        # Update existing candle for the same minute, or append new one
+        if state.buffer and abs(state.buffer[-1].timestamp - t) < 1.0:
+            state.buffer[-1] = candle   # same-minute update
+        elif not state.buffer or t > state.buffer[-1].timestamp:
+            state.buffer.append(candle)
+        # else: older historical candle already in buffer — skip
+
+        # Throttle UI redraws to ≤2 per second during history replay
+        now = time.time()
+        if now - state.last_update >= 0.5:
+            state.last_update = now
+            _update_ui()
+
+    # ── Stream loop (DXLink → demo fallback) ─────────────────────────────────
+    async def _stream_loop() -> None:
+        sym   = active_symbol[0]
+        state = _state()
+        live_ok = False
+        try:
+            token_data  = client.get_quote_token()
+            token       = token_data.get("token") or token_data.get("dxlink-token", "")
+            dxlink_url  = (
+                token_data.get("dxlink-url")
+                or token_data.get("websocket-url", "")
+            )
+            if not token or not dxlink_url:
+                raise ValueError(f"Missing token/URL in quote token response: {token_data}")
+
+            from_time_ms = int((time.time() - BUFFER_MINUTES * 60) * 1000)
+            streamer     = DXLinkStreamer(dxlink_url, token)
+
+            # Clear buffer — DXLink history (fromTime) will refill it
+            state.buffer.clear()
+            state.demo_mode = False
+            _refresh_demo_banner()
+
+            log.info("Starting DXLink stream for %s", sym)
+            live_ok = True
+
+            def on_candle(candle_dict: dict) -> None:
+                _process_candle_event(sym, candle_dict)
+
+            await streamer.stream_candles(
+                symbol=sym,
+                from_time_ms=from_time_ms,
+                on_candle=on_candle,
+            )
+
+        except asyncio.CancelledError:
+            raise  # propagate — task was cancelled by symbol switch or page close
+        except Exception as exc:
+            log.warning("DXLink stream failed for %s: %s — switching to demo", sym, exc)
+
+        # ── Demo fallback ──────────────────────────────────────────────────
+        if not live_ok and sym == active_symbol[0]:
+            state.demo_mode = True
+            if not state.buffer:
+                for c in _generate_demo_candles(sym):
+                    state.buffer.append(c)
+                now = time.time()
+                state.min_start = now - (now % 60)
+            _refresh_demo_banner()
+            _update_ui()
+
+            while sym == active_symbol[0]:
+                await asyncio.sleep(float(POLL_INTERVAL))
+                if sym == active_symbol[0]:
+                    _tick_demo()
+
+    # ── Demo banner refresh helper ─────────────────────────────────────────────
+    def _refresh_demo_banner() -> None:
+        state = _state()
+        if demo_banner_ref.current:
+            demo_banner_ref.current.content = _demo_banner_widget(state.demo_mode)
+            demo_banner_ref.current.update()
 
     # ── Symbol switch ─────────────────────────────────────────────────────────
     def _switch_symbol(new_sym: str) -> None:
@@ -599,26 +751,33 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         if not new_sym or new_sym == active_symbol[0]:
             return
 
-        # Stop current poll loop
-        polling_stop.set()
+        # Cancel the current stream / demo loop
+        if stream_task[0] is not None:
+            stream_task[0].cancel()
 
         # Switch active symbol
         active_symbol[0] = new_sym
 
-        # Populate cache (no-op if already cached)
+        # Ensure a SymbolState exists (no-op if already cached)
         _load_for_symbol(new_sym)
 
         # Clear last-signal key so a snackbar fires for this symbol's signals
         _state().last_sig_key = ()
 
-        # Restart poll loop
-        polling_stop.clear()
-        asyncio.create_task(_poll_loop())
+        # Start fresh stream loop
+        task = asyncio.create_task(_stream_loop())
+        stream_task[0] = task
 
-        # Update symbol label in header
+        # Update symbol label and description in header
         if symbol_label_ref.current:
             symbol_label_ref.current.value = f"{new_sym}  /  1m"
             symbol_label_ref.current.update()
+        if desc_ref.current:
+            desc_ref.current.value = _symbol_desc(new_sym)
+            desc_ref.current.update()
+
+        # Update demo banner visibility
+        _refresh_demo_banner()
 
         # Refresh chip row (highlight new active)
         if chip_row_ref.current:
@@ -661,15 +820,17 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
     # ── Bootstrap ─────────────────────────────────────────────────────────────
     _load_for_symbol(DEFAULT_SYMBOL)
-    asyncio.create_task(_poll_loop())
+    task = asyncio.create_task(_stream_loop())
+    stream_task[0] = task
 
+    # Initial display — buffer is empty until DXLink delivers first candles
     candles_init = list(_state().buffer)
     sma50_init   = _compute_sma(candles_init, 50)
     sma200_init  = _compute_sma(candles_init, 200)
     signals_init = detect_signals(candles_init)
 
     # ── Initial display values ────────────────────────────────────────────────
-    last_price = candles_init[-1].close if candles_init else 0.0
+    last_price_str = f"${candles_init[-1].close:,.2f}" if candles_init else "Connecting…"
     if signals_init:
         latest  = signals_init[-1]
         is_bull = latest.direction == "BULL"
@@ -677,7 +838,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         sig_color = COL_SIG_BULL if is_bull else COL_SIG_BEAR
         _state().last_sig_key = (latest.candle_index, latest.direction)
     else:
-        sig_txt   = "Scanning for liquidity grabs…"
+        sig_txt   = "Connecting to DXLink stream…"
         sig_color = COL_LABEL
 
     mode_txt   = "Demo" if _state().demo_mode else "Live"
@@ -767,7 +928,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
     body = ft.Column(
         controls=[
-            # Header: symbol label + price + signal
+            ft.Container(ref=demo_banner_ref, content=_demo_banner_widget(_state().demo_mode)),
             ft.Row(
                 [
                     ft.Column(
@@ -780,14 +941,21 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
                                 weight=ft.FontWeight.W_500,
                             ),
                             ft.Text(
+                                ref=desc_ref,
+                                value=_symbol_desc(DEFAULT_SYMBOL),
+                                size=11,
+                                color="#4a4a4a",
+                                weight=ft.FontWeight.W_400,
+                            ),
+                            ft.Text(
                                 ref=price_ref,
-                                value=f"${last_price:,.2f}",
+                                value=last_price_str,
                                 size=30,
                                 weight=ft.FontWeight.BOLD,
                                 color="white",
                             ),
                         ],
-                        spacing=2,
+                        spacing=1,
                     ),
                     ft.Container(expand=True),
                     ft.Text(
