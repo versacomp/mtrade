@@ -8,12 +8,15 @@ and arrow signals.
 """
 
 import asyncio
+import json
 import logging
 import random
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import flet as ft
@@ -171,6 +174,57 @@ class SymbolState:
 
 # Module-level symbol cache – persists across symbol switches within a session
 _symbol_cache: dict[str, SymbolState] = {}
+
+
+# ── Filesystem candle cache ─────────────────────────────────────────────────────
+_CACHE_DIR = Path.home() / ".mtrade" / "cache" / "candles"
+_last_flush: dict[str, float] = {}   # symbol → last flush Unix time
+
+
+def _cache_path(symbol: str) -> Path:
+    return _CACHE_DIR / f"{symbol.upper().lstrip('/')}.json"
+
+
+def _load_cache(symbol: str) -> list:
+    """Load candles from filesystem, filtered to last 4 hours. Returns [] on miss."""
+    try:
+        raw    = json.loads(_cache_path(symbol).read_text(encoding="utf-8"))
+        cutoff = time.time() - BUFFER_MINUTES * 60
+        return [
+            Candle(timestamp=c["timestamp"], open=c["open"],
+                   high=c["high"], low=c["low"], close=c["close"])
+            for c in raw if c.get("timestamp", 0) >= cutoff
+        ]
+    except Exception:
+        return []
+
+
+def _save_cache(symbol: str, candles: list) -> None:
+    """Write candles atomically (tmp → rename). Called from daemon thread."""
+    try:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        path = _cache_path(symbol)
+        tmp  = path.with_suffix(".tmp")
+        tmp.write_text(
+            json.dumps([
+                {"timestamp": c.timestamp, "open": c.open,
+                 "high": c.high, "low": c.low, "close": c.close}
+                for c in candles
+            ]),
+            encoding="utf-8",
+        )
+        tmp.replace(path)
+    except Exception as exc:
+        log.warning("Candle cache write failed for %s: %s", symbol, exc)
+
+
+def _schedule_flush(symbol: str, candles: list) -> None:
+    """Queue background flush, throttled to at most once per 30 s per symbol."""
+    now = time.time()
+    if now - _last_flush.get(symbol, 0) < 30:
+        return
+    _last_flush[symbol] = now
+    threading.Thread(target=_save_cache, args=(symbol, candles), daemon=True).start()
 
 
 # ── Demo data ──────────────────────────────────────────────────────────────────
@@ -492,9 +546,16 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
     # ── Stream task reference (cancel to stop/switch) ─────────────────────────
     stream_task: list = [None]  # list[asyncio.Task | None]
 
+    # ── Alert / sound state ───────────────────────────────────────────────────
+    alert_enabled: list[bool] = [True]
+    sound_enabled: list[bool] = [True]
+    alert_task:    list        = [None]  # list[asyncio.Task | None]
+
     # ── UI refs ───────────────────────────────────────────────────────────────
     chart_container_ref = ft.Ref[ft.Container]()
     chart_area_ref      = ft.Ref[ft.Container]()
+    alert_ref           = ft.Ref[ft.Container]()
+    alert_text_ref      = ft.Ref[ft.Text]()
     price_ref           = ft.Ref[ft.Text]()
     signal_ref          = ft.Ref[ft.Text]()
     status_ref          = ft.Ref[ft.Text]()
@@ -575,6 +636,50 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
         page.update()
 
+    # ── Alert helpers ─────────────────────────────────────────────────────────
+    def _trigger_sound() -> None:
+        """Play a short beep in a daemon thread (Windows only, silent on others)."""
+        if not sound_enabled[0]:
+            return
+        def _beep() -> None:
+            try:
+                import winsound
+                winsound.Beep(880, 120)
+            except Exception:
+                pass
+        threading.Thread(target=_beep, daemon=True).start()
+
+    async def _flash_alert(is_bull: bool, label: str, level: float) -> None:
+        """Show the alert overlay, blink 3×, then fade out."""
+        if not alert_enabled[0]:
+            return
+        if alert_ref.current is None or alert_text_ref.current is None:
+            return
+
+        bg_color = ft.Colors.GREEN_700 if is_bull else ft.Colors.RED_700
+        alert_text_ref.current.value = f"Liquidity Grab: {label}  @ {level:.2f}"
+        alert_ref.current.bgcolor    = bg_color
+        alert_ref.current.opacity    = 1.0
+        alert_ref.current.visible    = True
+        alert_ref.current.update()
+
+        # Blink 3×
+        for _ in range(3):
+            await asyncio.sleep(0.20)
+            alert_ref.current.opacity = 0.0
+            alert_ref.current.update()
+            await asyncio.sleep(0.20)
+            alert_ref.current.opacity = 1.0
+            alert_ref.current.update()
+
+        # Hold, then fade out
+        await asyncio.sleep(1.5)
+        alert_ref.current.opacity = 0.0
+        alert_ref.current.update()
+        await asyncio.sleep(0.40)   # wait for animated fade
+        alert_ref.current.visible = False
+        alert_ref.current.update()
+
     # ── UI update ─────────────────────────────────────────────────────────────
     def _update_ui() -> None:
         sym     = active_symbol[0]
@@ -631,6 +736,13 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
                     open=True,
                 )
                 page.update()
+                # Cancel any running alert animation, then start a new one
+                if alert_task[0] is not None:
+                    alert_task[0].cancel()
+                alert_task[0] = asyncio.create_task(
+                    _flash_alert(is_bull, label, latest.level)
+                )
+                _trigger_sound()
         else:
             if signal_ref.current:
                 signal_ref.current.value = "Scanning for liquidity grabs…"
@@ -726,6 +838,10 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             state.last_update = now
             _update_ui()
 
+        # Background filesystem flush (live candles only, throttled ≤ 1/30 s)
+        if not state.demo_mode:
+            _schedule_flush(sym, list(state.buffer))
+
     # ── Stream loop (DXLink → demo fallback) ─────────────────────────────────
     async def _stream_loop() -> None:
         sym   = active_symbol[0]
@@ -745,15 +861,26 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             streamer_sym = client.get_futures_streamer_symbol(sym)
             log.info("DXLink streamer-symbol for %s → %s", sym, streamer_sym)
 
-            from_time_ms = int((time.time() - BUFFER_MINUTES * 60) * 1000)
-            streamer     = DXLinkStreamer(dxlink_url, token)
-
-            # Clear buffer — DXLink history (fromTime) will refill it
+            # ── Seed buffer from filesystem cache ──────────────────────────────
             state.buffer.clear()
+            cached = _load_cache(sym)
+            if cached:
+                for c in cached:
+                    state.buffer.append(c)
+                from_time_ms = int(cached[-1].timestamp * 1000) + 1
+                log.info("Seeded %d candles from cache for %s; DXLink gap-fill from %d",
+                         len(cached), sym, from_time_ms)
+            else:
+                from_time_ms = int((time.time() - BUFFER_MINUTES * 60) * 1000)
+                log.info("No cache for %s; requesting full 4h from DXLink", sym)
+
             state.demo_mode = False
             _refresh_demo_banner()
+            if state.buffer:
+                _update_ui()   # render cached data immediately while DXLink connects
 
-            live_ok = True
+            streamer = DXLinkStreamer(dxlink_url, token)
+            live_ok  = True
 
             def on_candle(candle_dict: dict) -> None:
                 _process_candle_event(sym, candle_dict)
@@ -773,8 +900,14 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         if not live_ok and sym == active_symbol[0]:
             state.demo_mode = True
             if not state.buffer:
-                for c in _generate_demo_candles(sym):
-                    state.buffer.append(c)
+                cached = _load_cache(sym)
+                if cached:
+                    for c in cached:
+                        state.buffer.append(c)
+                    log.info("Demo mode seeded from cache: %d candles for %s", len(cached), sym)
+                else:
+                    for c in _generate_demo_candles(sym):
+                        state.buffer.append(c)
                 now = time.time()
                 state.min_start = now - (now % 60)
             _refresh_demo_banner()
@@ -939,15 +1072,40 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         wrap=False,
     )
 
+    # Alert overlay — positioned top-right inside the chart Stack
+    alert_overlay = ft.Container(
+        ref=alert_ref,
+        content=ft.Text(
+            ref=alert_text_ref,
+            value="",
+            size=13,
+            color="white",
+            weight=ft.FontWeight.W_600,
+        ),
+        visible=False,
+        opacity=1.0,
+        animate_opacity=ft.Animation(200, ft.AnimationCurve.EASE_IN_OUT),
+        bgcolor=ft.Colors.GREEN_700,
+        border_radius=6,
+        padding=ft.padding.symmetric(horizontal=12, vertical=8),
+        right=8,
+        top=8,
+    )
+
     # Chart area — height tracks page height dynamically via _update_ui / on_resized
     chart_area = ft.Container(
         ref=chart_area_ref,
-        content=ft.Container(
-            ref=chart_container_ref,
-            content=_build_chart(
-                candles_init, sma50_init, sma200_init, signals_init,
-                init_chart_w, init_chart_h, init_n_visible,
-            ),
+        content=ft.Stack(
+            [
+                ft.Container(
+                    ref=chart_container_ref,
+                    content=_build_chart(
+                        candles_init, sma50_init, sma200_init, signals_init,
+                        init_chart_w, init_chart_h, init_n_visible,
+                    ),
+                ),
+                alert_overlay,
+            ],
         ),
         height=init_chart_h + 4,
         bgcolor=COL_BG,
@@ -970,9 +1128,28 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             ft.Container(width=10),
             ft.Text("▼", size=14, color=COL_SIG_BEAR, weight=ft.FontWeight.BOLD),
             ft.Text("Bear grab reversal", size=12, color=COL_SIG_BEAR),
+            ft.Container(expand=True),
+            ft.Checkbox(
+                label="Alert",
+                value=True,
+                active_color=COL_CHIP_ACT,
+                check_color="white",
+                label_style=ft.TextStyle(size=12, color=COL_LABEL),
+                on_change=lambda e: alert_enabled.__setitem__(0, e.control.value),
+            ),
+            ft.Container(width=4),
+            ft.Checkbox(
+                label="Sound",
+                value=True,
+                active_color=COL_CHIP_ACT,
+                check_color="white",
+                label_style=ft.TextStyle(size=12, color=COL_LABEL),
+                on_change=lambda e: sound_enabled.__setitem__(0, e.control.value),
+            ),
         ],
         spacing=4,
-        wrap=True,
+        wrap=False,
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
     )
 
     body = ft.Column(
