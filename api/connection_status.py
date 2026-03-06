@@ -11,7 +11,7 @@ from typing import Callable, Optional
 
 
 class ConnState(Enum):
-    LIVE    = "LIVE"     # REST authenticated + DXLink streaming real data
+    LIVE    = "CONNECTED"  # REST authenticated + DXLink streaming real data
     DEMO    = "DEMO"     # DXLink unavailable — running on simulated data
     OFFLINE = "OFFLINE"  # Auth failed or REST API unreachable
 
