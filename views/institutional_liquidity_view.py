@@ -258,6 +258,7 @@ class SymbolState:
     demo_mode:    bool  = False
     last_sig_key: tuple = ()
     last_update:  float = 0.0  # Unix timestamp of last UI update (throttle)
+    contract_sym: str   = ""   # front-month streamer symbol (e.g. /MESU26:XCME) for live orders
     key_levels:   KeyLevels = field(default_factory=KeyLevels)
     sim_trades:       list = field(default_factory=list)  # list[SimTrade]
     re_entry_pending: bool = False   # True while waiting for the RE_ENTRY_DELAY cooldown
