@@ -102,6 +102,40 @@ def build_login_view(on_success, on_error) -> ft.View:
         expand=True,
     )
 
+    # ── Environment selector ───────────────────────────────────────────────────
+    env_row = ft.Row(
+        [
+            ft.Switch(
+                value=config.is_sandbox(),
+                active_color=_COL_SANDBOX,
+                inactive_thumb_color=_COL_PRODUCTION,
+                inactive_track_color=ft.Colors.with_opacity(0.4, _COL_PRODUCTION),
+                on_change=_on_env_toggle,
+            ),
+            ft.Container(
+                ref=env_badge_ref,
+                content=ft.Text(
+                    ref=env_label_ref,
+                    value=_env_label(),
+                    size=11,
+                    color=ft.Colors.WHITE,
+                    weight=ft.FontWeight.BOLD,
+                ),
+                bgcolor=_env_color(),
+                border_radius=12,
+                padding=ft.padding.symmetric(horizontal=10, vertical=4),
+            ),
+            ft.Text(
+                "Switch before signing in — cannot change after login",
+                size=11,
+                color=ft.Colors.ON_SURFACE_VARIANT,
+                italic=True,
+            ),
+        ],
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        spacing=10,
+    )
+
     return ft.View(
         route="/",
         controls=[
@@ -110,10 +144,12 @@ def build_login_view(on_success, on_error) -> ft.View:
                     [
                         ft.Text("MTrade", size=32, weight=ft.FontWeight.BOLD),
                         ft.Text(
-                            "Connect to tastytrade (sandbox)",
+                            "Connect to tastytrade",
                             size=14,
                             color=ft.Colors.ON_SURFACE_VARIANT,
                         ),
+                        ft.Divider(),
+                        env_row,
                         ft.Divider(),
                         ft.Text("Sign in", size=18, weight=ft.FontWeight.W_500),
                         login_field,
