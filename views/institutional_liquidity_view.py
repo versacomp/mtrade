@@ -945,9 +945,9 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
     stats_ref           = ft.Ref[ft.Text]()
 
     # ── Dynamic chart dimensions ───────────────────────────────────────────────
-    # Overhead: AppBar ~56px + padding 32px + header 70px + picker 40px +
-    #           spacing 60px + legend 28px + stats 18px + status 20px ≈ 324px
-    _OVERHEAD = 324
+    # Overhead: AppBar 56px + padding 32px + header 70px + picker 40px +
+    #           toolbar 28px + 7×spacing 70px + legend 35px + stats 18px + status 18px ≈ 367px
+    _OVERHEAD = 370
 
     def _get_chart_dims() -> tuple[int, int, int]:
         """Return (chart_w, chart_h, n_visible) based on current page size."""
