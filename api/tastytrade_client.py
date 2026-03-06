@@ -244,6 +244,18 @@ class TastytradeClient:
         data = self._get("/api-quote-tokens")
         return data.get("data", data)
 
+    def place_order(self, account_number: str, order_body: dict) -> dict[str, Any]:
+        """POST /accounts/{account_number}/orders — place a new order."""
+        log.info("Placing order: acct=%s body=%s", account_number, order_body)
+        data = self._post(f"/accounts/{account_number}/orders", json=order_body)
+        return data.get("data", data)
+
+    def cancel_order(self, account_number: str, order_id: str) -> dict[str, Any]:
+        """DELETE /accounts/{account_number}/orders/{order_id} — cancel an open order."""
+        log.info("Cancelling order: acct=%s order_id=%s", account_number, order_id)
+        data = self._delete(f"/accounts/{account_number}/orders/{order_id}")
+        return data.get("data", data)
+
     def get_candle_history(self, symbol: str, n_minutes: int = 240) -> list[dict]:
         """
         Fetch historical 1-minute OHLCV candles for a symbol.
