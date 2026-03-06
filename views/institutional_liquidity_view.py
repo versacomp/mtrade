@@ -2242,10 +2242,46 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         state.re_entry_pending = False
         asyncio.create_task(_redraw_chart())
 
-    def _toggle_sim() -> None:
-        """Toggle the global sim on/off flag and refresh the indicator."""
-        global _sim_enabled
-        _sim_enabled = not _sim_enabled
+    # ── Trading mode badge (throbbing) ────────────────────────────────────────
+    async def _throb_badge() -> None:
+        """Pulse the badge opacity on a 1.55 s interval until cancelled."""
+        try:
+            while True:
+                if badge_ref.current and badge_ref.current.visible:
+                    badge_ref.current.opacity = 0.35
+                    badge_ref.current.update()
+                await asyncio.sleep(1.55)
+                if badge_ref.current and badge_ref.current.visible:
+                    badge_ref.current.opacity = 1.0
+                    badge_ref.current.update()
+                await asyncio.sleep(1.55)
+        except asyncio.CancelledError:
+            pass
+
+    def _show_badge(text: str, color: str) -> None:
+        if throb_task[0] is not None:
+            throb_task[0].cancel()
+        if badge_ref.current:
+            badge_ref.current.bgcolor  = color
+            badge_ref.current.opacity  = 1.0
+            badge_ref.current.visible  = True
+            badge_ref.current.update()
+        if badge_text_ref.current:
+            badge_text_ref.current.value = text
+            badge_text_ref.current.update()
+        throb_task[0] = asyncio.create_task(_throb_badge())
+
+    def _hide_badge() -> None:
+        if throb_task[0] is not None:
+            throb_task[0].cancel()
+            throb_task[0] = None
+        if badge_ref.current:
+            badge_ref.current.visible = False
+            badge_ref.current.update()
+
+    # ── Sim toggle ─────────────────────────────────────────────────────────────
+    def _sync_sim_ui() -> None:
+        """Sync sim button + label to the current _sim_enabled state."""
         if sim_btn_ref.current:
             sim_btn_ref.current.icon = (
                 ft.Icons.STOP_CIRCLE_OUTLINED if _sim_enabled else ft.Icons.PLAY_CIRCLE_OUTLINED
