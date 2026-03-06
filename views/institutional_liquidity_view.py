@@ -1259,7 +1259,8 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         pan_accum[0] = 0.0
 
     def _on_pan_update(e) -> None:
-        pan_accum[0] += -e.delta_x          # drag left → positive → older data
+        dx = e.local_delta.x if e.local_delta is not None else 0.0
+        pan_accum[0] += -dx                  # drag left → positive → older data
         delta = int(pan_accum[0] / candle_w[0])
         if delta != 0:
             pan_accum[0] -= delta * candle_w[0]
@@ -1269,15 +1270,17 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             _update_ui()
 
     def _on_scroll(e) -> None:
-        if abs(e.scroll_delta_x) >= abs(e.scroll_delta_y):
+        sdx = e.scroll_delta.x if e.scroll_delta is not None else 0.0
+        sdy = e.scroll_delta.y if e.scroll_delta is not None else 0.0
+        if abs(sdx) >= abs(sdy):
             # Horizontal component → pan time axis
             total = len(list(_state().buffer))
             _, _, nv = _get_chart_dims()
-            change = -1 if e.scroll_delta_x > 0 else 1   # right = newer = offset decreases
+            change = -1 if sdx > 0 else 1   # right = newer = offset decreases
             view_offset[0] = max(0, min(view_offset[0] + change, max(0, total - nv)))
         else:
             # Vertical component → zoom X  (up = zoom in = wider candles)
-            candle_w[0] = max(3, min(30, candle_w[0] + (1 if e.scroll_delta_y < 0 else -1)))
+            candle_w[0] = max(3, min(30, candle_w[0] + (1 if sdy < 0 else -1)))
             if zoom_lbl_ref.current:
                 zoom_lbl_ref.current.value = str(candle_w[0])
                 zoom_lbl_ref.current.update()
