@@ -158,6 +158,15 @@ COL_TRADE_TP    = "#44DD88"   # take profit line
 SL_BUFFER = 0.0    # extra points beyond wick tip placed on stop (0 = exact wick tip)
 RR_RATIO  = 2.0    # take-profit Risk:Reward multiplier (1:2)
 
+# RSI sub-panel
+RSI_PERIOD  = 14
+RSI_PANEL_H = 75   # pixel height of RSI sub-panel
+RSI_GAP     = 6    # pixel gap between candle area and RSI panel
+
+COL_RSI    = "#9C27B0"   # RSI line (purple)
+COL_RSI_OB = "#FF5555"   # overbought level (≥70)
+COL_RSI_OS = "#44DD88"   # oversold level (≤30)
+
 
 # ── Data classes ───────────────────────────────────────────────────────────────
 @dataclass
@@ -174,7 +183,8 @@ class Signal:
     candle_index: int          # absolute index in the buffer list
     direction:    str          # "BULL" or "BEAR"
     level:        float        # grabbed price level
-    source:       str = "SWING"  # "SWING" | "4HH" | "4HL" | "PDH" | "PDL"
+    source:       str  = "SWING"  # "SWING" | "4HH" | "4HL" | "PDH" | "PDL"
+    divergence:   bool = False    # True when RSI divergence confirms the signal
 
 
 @dataclass
@@ -222,6 +232,7 @@ class SymbolState:
     cached_sma50:   list = field(default_factory=list)
     cached_sma200:  list = field(default_factory=list)
     cached_signals: list = field(default_factory=list)
+    cached_rsi:     list = field(default_factory=list)
 
 
 # Module-level symbol cache – persists across symbol switches within a session
@@ -499,14 +510,99 @@ def _compute_sma(candles: list[Candle], period: int) -> list[Optional[float]]:
     return result
 
 
+def _compute_rsi(candles: list, period: int = RSI_PERIOD) -> list:
+    """
+    Wilder's smoothed RSI.  Returns list[Optional[float]] of the same length as candles.
+    Values are None until the first full period + 1 candles are available.
+    """
+    closes = [c.close for c in candles]
+    n = len(closes)
+    result: list = [None] * n
+    if n < period + 1:
+        return result
+
+    # Seed with simple average of first period
+    gains, losses = [], []
+    for i in range(1, period + 1):
+        diff = closes[i] - closes[i - 1]
+        gains.append(max(diff, 0.0))
+        losses.append(max(-diff, 0.0))
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+
+    if avg_loss == 0:
+        result[period] = 100.0
+    else:
+        rs = avg_gain / avg_loss
+        result[period] = 100.0 - 100.0 / (1.0 + rs)
+
+    # Wilder's smoothing for the rest
+    for i in range(period + 1, n):
+        diff     = closes[i] - closes[i - 1]
+        avg_gain = (avg_gain * (period - 1) + max(diff, 0.0)) / period
+        avg_loss = (avg_loss * (period - 1) + max(-diff, 0.0)) / period
+        if avg_loss == 0:
+            result[i] = 100.0
+        else:
+            rs = avg_gain / avg_loss
+            result[i] = 100.0 - 100.0 / (1.0 + rs)
+
+    return result
+
+
+def _check_rsi_divergence(sig: "Signal", candles: list, rsi: list) -> bool:
+    """
+    Returns True when RSI divergence confirms the signal direction.
+
+    Bullish divergence: price made a lower-low at the grab candle, but RSI made a
+                        higher-low → buyers are exhausted on the sell side.
+    Bearish divergence: price made a higher-high at the grab candle, but RSI made a
+                        lower-high → buyers are running out of steam.
+
+    We scan back SWING_WINDOW candles to find at least one prior bar where
+    price was in the opposite extreme compared to the grab candle.
+    """
+    ci = sig.candle_index
+    if ci >= len(candles) or ci >= len(rsi):
+        return False
+    rsi_grab = rsi[ci]
+    if rsi_grab is None:
+        return False
+
+    lookback_start = max(0, ci - SWING_WINDOW)
+
+    if sig.direction == "BULL":
+        grab_low = candles[ci].low
+        for ri in range(ci - 2, lookback_start - 1, -1):
+            if rsi[ri] is None:
+                continue
+            # Price lower-low AND RSI higher-low
+            if grab_low < candles[ri].low and rsi_grab > rsi[ri]:
+                return True
+    else:  # BEAR
+        grab_high = candles[ci].high
+        for ri in range(ci - 2, lookback_start - 1, -1):
+            if rsi[ri] is None:
+                continue
+            # Price higher-high AND RSI lower-high
+            if grab_high > candles[ri].high and rsi_grab < rsi[ri]:
+                return True
+
+    return False
+
+
 def _compute_heavy(candles: list, key_levels: "KeyLevels") -> tuple:
-    """SMA + signal detection in one pass — safe to call from a thread executor."""
+    """SMA + RSI + signal detection — safe to call from a thread executor."""
     sma50   = _compute_sma(candles, 50)
     sma200  = _compute_sma(candles, 200)
+    rsi     = _compute_rsi(candles)
     kl_sigs = detect_key_level_signals(candles, key_levels)
     kl_idxs = {s.candle_index for s in kl_sigs}
     sw_sigs = [s for s in detect_signals(candles) if s.candle_index not in kl_idxs]
-    return sma50, sma200, kl_sigs + sw_sigs
+    all_sigs = kl_sigs + sw_sigs
+    for sig in all_sigs:
+        sig.divergence = _check_rsi_divergence(sig, candles, rsi)
+    return sma50, sma200, rsi, all_sigs
 
 
 def _swing_highs(candles: list[Candle], lookback: int = SWING_LOOKBACK) -> list[tuple[int, float]]:
@@ -650,8 +746,9 @@ def _build_chart(
     price_scale: float                = 1.0,
     buf_start:   Optional[int]        = None,
     sim_trades:  Optional[list]       = None,
+    rsi:         Optional[list]       = None,
 ) -> ft.Control:
-    """Render the dark candlestick canvas with SMA lines and signal arrows."""
+    """Render the dark candlestick canvas with SMA lines, signal arrows, and RSI panel."""
 
     if not candles:
         return ft.Container(
@@ -669,6 +766,7 @@ def _build_chart(
     visible    = candles[start:end]
     vis_sma50  = (sma50  or [])[start:end]
     vis_sma200 = (sma200 or [])[start:end]
+    vis_rsi    = (rsi    or [])[start:end]
     buf_offset = start
 
     all_prices: list[float] = []
@@ -681,11 +779,22 @@ def _build_chart(
         if v is not None:
             all_prices.append(v)
 
-    mn, mx     = min(all_prices), max(all_prices)
-    pad        = (mx - mn) * 0.08 / price_scale or 2.0
+    mn, mx      = min(all_prices), max(all_prices)
+    pad         = (mx - mn) * 0.08 / price_scale or 2.0
     mn -= pad;  mx += pad
     price_range = mx - mn
-    plot_h      = chart_h - PAD_TOP - PAD_BOTTOM
+    # Reserve space at the bottom for the RSI sub-panel when RSI data is present
+    rsi_visible = rsi is not None
+    rsi_reserve = (RSI_PANEL_H + RSI_GAP) if rsi_visible else 0
+    plot_h      = chart_h - PAD_TOP - PAD_BOTTOM - rsi_reserve
+
+    # RSI panel y-coordinates (valid only when rsi_visible)
+    rsi_top = float(chart_h - PAD_BOTTOM - RSI_PANEL_H)
+    rsi_bot = float(chart_h - PAD_BOTTOM)
+
+    def ry(v: float) -> float:
+        """Map RSI value 0–100 → pixel y inside the RSI sub-panel."""
+        return rsi_top + (100.0 - v) / 100.0 * RSI_PANEL_H
 
     def py(price: float) -> float:
         return PAD_TOP + plot_h * (mx - price) / price_range
@@ -797,33 +906,40 @@ def _build_chart(
         ))
 
     # Signal arrows
+    # Divergence-confirmed signals get full-bright arrows;
+    # unconfirmed signals get smaller, muted arrows (still shown for context).
     for sig in signals:
         vi = sig.candle_index - buf_offset
         if not 0 <= vi < len(visible):
             continue
         c = visible[vi]
         x = cx(vi)
+        confirmed = sig.divergence
+        hw = 7 if confirmed else 5    # half-width of arrow head
+        ht = 11 if confirmed else 8   # height of arrow head
         if sig.direction == "BULL":
+            col   = COL_SIG_BULL if confirmed else "#007A3D"
             tip_y = py(c.low) + 14
             shapes.append(cv.Path(
                 elements=[
-                    cv.Path.MoveTo(x,     tip_y - 11),
-                    cv.Path.LineTo(x - 7, tip_y),
-                    cv.Path.LineTo(x + 7, tip_y),
+                    cv.Path.MoveTo(x,      tip_y - ht),
+                    cv.Path.LineTo(x - hw, tip_y),
+                    cv.Path.LineTo(x + hw, tip_y),
                     cv.Path.Close(),
                 ],
-                paint=ft.Paint(color=COL_SIG_BULL, style=ft.PaintingStyle.FILL),
+                paint=ft.Paint(color=col, style=ft.PaintingStyle.FILL),
             ))
         else:
+            col   = COL_SIG_BEAR if confirmed else "#882222"
             tip_y = py(c.high) - 3
             shapes.append(cv.Path(
                 elements=[
-                    cv.Path.MoveTo(x,     tip_y + 11),
-                    cv.Path.LineTo(x - 7, tip_y),
-                    cv.Path.LineTo(x + 7, tip_y),
+                    cv.Path.MoveTo(x,      tip_y + ht),
+                    cv.Path.LineTo(x - hw, tip_y),
+                    cv.Path.LineTo(x + hw, tip_y),
                     cv.Path.Close(),
                 ],
-                paint=ft.Paint(color=COL_SIG_BEAR, style=ft.PaintingStyle.FILL),
+                paint=ft.Paint(color=col, style=ft.PaintingStyle.FILL),
             ))
 
     # ── Simulated trade levels: entry / SL / TP horizontal dashed lines ───────
@@ -881,6 +997,76 @@ def _build_chart(
                         )],
                     ))
 
+    # ── RSI sub-panel ────────────────────────────────────────────────────────────
+    if rsi_visible:
+        # Panel background
+        shapes.append(cv.Rect(
+            x=PAD_LEFT, y=rsi_top, width=float(chart_w - PAD_LEFT - PAD_RIGHT), height=RSI_PANEL_H,
+            paint=ft.Paint(color="#181818", style=ft.PaintingStyle.FILL),
+        ))
+        # OB / OS / mid reference lines
+        for ref_val, ref_col, ref_lbl in [
+            (70.0, COL_RSI_OB, "70"),
+            (50.0, "#333333",  "50"),
+            (30.0, COL_RSI_OS, "30"),
+        ]:
+            ry_ref = ry(ref_val)
+            # dashed
+            kx = float(PAD_LEFT)
+            while kx < chart_w - PAD_RIGHT:
+                kx2 = min(kx + 5.0, float(chart_w - PAD_RIGHT))
+                shapes.append(cv.Line(
+                    x1=kx, y1=ry_ref, x2=kx2, y2=ry_ref,
+                    paint=ft.Paint(color=ref_col, stroke_width=0.6),
+                ))
+                kx += 9.0
+            shapes.append(cv.Text(
+                x=float(PAD_LEFT) - 20, y=ry_ref - 5,
+                spans=[ft.TextSpan(ref_lbl, style=ft.TextStyle(size=8, color=ref_col))],
+            ))
+
+        # RSI line segments (colored by level)
+        def _rsi_seg_color(v: float) -> str:
+            if v >= 70:
+                return COL_RSI_OB
+            if v <= 30:
+                return COL_RSI_OS
+            return COL_RSI
+
+        prev_rsi: Optional[tuple[float, float]] = None
+        for vi, rsi_v in enumerate(vis_rsi):
+            if rsi_v is None:
+                prev_rsi = None
+                continue
+            pt = (cx(vi), ry(rsi_v))
+            if prev_rsi is not None:
+                shapes.append(cv.Line(
+                    x1=prev_rsi[0], y1=prev_rsi[1], x2=pt[0], y2=pt[1],
+                    paint=ft.Paint(color=_rsi_seg_color(rsi_v), stroke_width=1.2),
+                ))
+            prev_rsi = pt
+
+        # Divergence dots — small filled squares at confirmed-signal candle RSI positions
+        div_sig_vis_indices = {
+            sig.candle_index - buf_offset
+            for sig in signals
+            if sig.divergence and 0 <= (sig.candle_index - buf_offset) < len(vis_rsi)
+        }
+        for vi in div_sig_vis_indices:
+            if vi < len(vis_rsi) and vis_rsi[vi] is not None:
+                dot_x = cx(vi) - 3
+                dot_y = ry(vis_rsi[vi]) - 3
+                shapes.append(cv.Rect(
+                    x=dot_x, y=dot_y, width=6, height=6,
+                    paint=ft.Paint(color="#FFD700", style=ft.PaintingStyle.FILL),
+                ))
+
+        # RSI label
+        shapes.append(cv.Text(
+            x=float(PAD_LEFT) + 4, y=rsi_top + 4,
+            spans=[ft.TextSpan(f"RSI {RSI_PERIOD}", style=ft.TextStyle(size=8, color=COL_RSI))],
+        ))
+
     # In-chart legend (row 1: SMAs)
     lx, ly = PAD_LEFT + 4, PAD_TOP + 4
     shapes += [
@@ -905,6 +1091,19 @@ def _build_chart(
         cv.Text(x=lx + 76,  y=ly2 - 2,
                 spans=[ft.TextSpan("4H H/L",  style=ft.TextStyle(size=9, color="#909090"))]),
     ]
+    # In-chart legend (row 3: RSI)
+    if rsi_visible:
+        ly3 = ly + 28
+        shapes += [
+            cv.Line(x1=lx,      y1=ly3 + 4, x2=lx + 12, y2=ly3 + 4,
+                    paint=ft.Paint(color=COL_RSI, stroke_width=1.5)),
+            cv.Text(x=lx + 14,  y=ly3 - 2,
+                    spans=[ft.TextSpan(f"RSI {RSI_PERIOD}", style=ft.TextStyle(size=9, color=COL_RSI))]),
+            cv.Rect(x=lx + 62, y=ly3, width=8, height=8,
+                    paint=ft.Paint(color="#FFD700", style=ft.PaintingStyle.FILL)),
+            cv.Text(x=lx + 74,  y=ly3 - 2,
+                    spans=[ft.TextSpan("Divergence", style=ft.TextStyle(size=9, color="#FFD700"))]),
+        ]
 
     return cv.Canvas(shapes=shapes, width=chart_w, height=chart_h)
 
@@ -1036,6 +1235,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
                 state.cached_sma50, state.cached_sma200, state.cached_signals,
                 chart_w, chart_h, n_visible,
                 state.key_levels, candle_w[0], price_scale[0], buf_start, state.sim_trades,
+                state.cached_rsi,
             )
             chart_container_ref.current.content = chart_canvas
             chart_container_ref.current.update()
@@ -1088,7 +1288,10 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
     # ── Trade simulation helpers ───────────────────────────────────────────────
     def _open_sim_trade(sig: Signal, candles: list) -> None:
-        """Create a SimTrade for *sig* if one doesn't already exist for that candle."""
+        """Create a SimTrade for *sig* if RSI divergence is confirmed and no duplicate exists."""
+        # Only enter trades where RSI divergence confirms the reversal
+        if not sig.divergence:
+            return
         if sig.candle_index >= len(candles):
             return
         c     = candles[sig.candle_index]
@@ -1223,12 +1426,13 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
         loop = asyncio.get_running_loop()
 
-        # Heavy computation off the event loop (SMA + signal detection)
-        sma50, sma200, signals = await loop.run_in_executor(
+        # Heavy computation off the event loop (SMA + RSI + signal detection)
+        sma50, sma200, rsi, signals = await loop.run_in_executor(
             None, _compute_heavy, candles, state.key_levels,
         )
         state.cached_sma50   = sma50
         state.cached_sma200  = sma200
+        state.cached_rsi     = rsi
         state.cached_signals = signals
 
         # Trade logic (fast — stays on event loop)
@@ -1243,7 +1447,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         chart_canvas = await loop.run_in_executor(
             None, _build_chart,
             candles, sma50, sma200, signals, chart_w, chart_h, n_visible,
-            state.key_levels, candle_w[0], price_scale[0], buf_start, state.sim_trades,
+            state.key_levels, candle_w[0], price_scale[0], buf_start, state.sim_trades, rsi,
         )
 
         # ── UI updates (back on event loop) ───────────────────────────────────
@@ -1534,11 +1738,11 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             symbol_field_ref.current.value = ""
             symbol_field_ref.current.update()
 
-        _update_ui()
+        asyncio.create_task(_update_ui())
 
     # ── Lightweight chart-only redraw (used by pan/zoom) ─────────────────────
     async def _redraw_chart() -> None:
-        """Rebuild canvas using cached SMA/signals — skips all expensive computation."""
+        """Rebuild canvas using cached SMA/RSI/signals — skips all expensive computation."""
         state   = _state()
         candles = list(state.buffer)
         if not candles:
@@ -1552,6 +1756,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             state.cached_sma50, state.cached_sma200, state.cached_signals,
             chart_w, chart_h, n_visible,
             state.key_levels, candle_w[0], price_scale[0], buf_start, state.sim_trades,
+            state.cached_rsi,
         )
         if chart_container_ref.current:
             chart_container_ref.current.content = chart_canvas
@@ -1649,7 +1854,10 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
     candles_init = list(_state().buffer)
     sma50_init   = _compute_sma(candles_init, 50)
     sma200_init  = _compute_sma(candles_init, 200)
+    rsi_init     = _compute_rsi(candles_init)
     signals_init = detect_signals(candles_init)
+    for _s in signals_init:
+        _s.divergence = _check_rsi_divergence(_s, candles_init, rsi_init)
 
     # ── Initial display values ────────────────────────────────────────────────
     last_price_str = f"${candles_init[-1].close:,.2f}" if candles_init else "Connecting…"
@@ -1744,6 +1952,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
                         price_scale=price_scale[0],
                         buf_start=max(0, len(candles_init) - init_n_visible),
                         sim_trades=_state().sim_trades,
+                        rsi=rsi_init,
                     ),
                 ),
                 alert_overlay,
@@ -1761,15 +1970,24 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         [
             ft.Container(width=16, height=3, bgcolor=COL_SMA50,  border_radius=2),
             ft.Text("SMA 50",  size=12, color=COL_SMA50),
-            ft.Container(width=10),
+            ft.Container(width=8),
             ft.Container(width=16, height=3, bgcolor=COL_SMA200, border_radius=2),
             ft.Text("SMA 200", size=12, color=COL_SMA200),
-            ft.Container(width=10),
+            ft.Container(width=8),
+            ft.Container(width=10, height=3, bgcolor=COL_RSI, border_radius=2),
+            ft.Text(f"RSI {RSI_PERIOD}", size=12, color=COL_RSI),
+            ft.Container(width=8),
             ft.Text("▲", size=14, color=COL_SIG_BULL, weight=ft.FontWeight.BOLD),
-            ft.Text("Bull grab reversal", size=12, color=COL_SIG_BULL),
-            ft.Container(width=10),
+            ft.Text("Bull +div", size=12, color=COL_SIG_BULL),
+            ft.Container(width=6),
+            ft.Text("▲", size=12, color="#007A3D", weight=ft.FontWeight.BOLD),
+            ft.Text("Bull", size=12, color="#007A3D"),
+            ft.Container(width=8),
             ft.Text("▼", size=14, color=COL_SIG_BEAR, weight=ft.FontWeight.BOLD),
-            ft.Text("Bear grab reversal", size=12, color=COL_SIG_BEAR),
+            ft.Text("Bear +div", size=12, color=COL_SIG_BEAR),
+            ft.Container(width=6),
+            ft.Text("▼", size=12, color="#882222", weight=ft.FontWeight.BOLD),
+            ft.Text("Bear", size=12, color="#882222"),
             ft.Container(expand=True),
             ft.Checkbox(
                 label="Alert",
