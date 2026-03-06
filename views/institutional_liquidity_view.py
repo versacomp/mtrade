@@ -947,9 +947,10 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         if signals:
             latest  = signals[-1]
             key     = (latest.candle_index, latest.direction)
-            is_bull = latest.direction == "BULL"
-            label   = "▲ BULL reversal" if is_bull else "▼ BEAR reversal"
-            color   = COL_SIG_BULL if is_bull else COL_SIG_BEAR
+            is_bull  = latest.direction == "BULL"
+            src_tag  = f" [{latest.source}]" if latest.source != "SWING" else ""
+            label    = f"▲ BULL reversal{src_tag}" if is_bull else f"▼ BEAR reversal{src_tag}"
+            color    = COL_SIG_BULL if is_bull else COL_SIG_BEAR
 
             if signal_ref.current:
                 signal_ref.current.value = f"SIGNAL: {label}  @ {latest.level:.2f}"
@@ -1108,6 +1109,18 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
             state.demo_mode = False
             _refresh_demo_banner()
+
+            # Compute key levels from the extended (48h) cache
+            all_cached = _load_cache_full(sym)
+            if all_cached:
+                state.key_levels = _compute_key_levels(all_cached)
+                log.info(
+                    "Key levels for %s: 4HH=%s 4HL=%s PDH=%s PDL=%s",
+                    sym,
+                    state.key_levels.h4_high, state.key_levels.h4_low,
+                    state.key_levels.pd_high, state.key_levels.pd_low,
+                )
+
             if state.buffer:
                 _update_ui()   # render cached data immediately while DXLink connects
 
