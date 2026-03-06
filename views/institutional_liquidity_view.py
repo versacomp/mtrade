@@ -13,6 +13,7 @@ import logging
 import random
 import threading
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -126,6 +127,7 @@ PAD_TOP    = 18
 PAD_BOTTOM = 28
 PAD_LEFT   = 62
 PAD_RIGHT  = 15
+LIVE_EDGE_PAD = 3   # empty candle slots reserved at right when at live position
 CHART_W    = PAD_LEFT + VISIBLE_CANDLES * CANDLE_STEP + PAD_RIGHT  # ~797 px
 
 # Volume profile
@@ -147,6 +149,15 @@ COL_CHIP_ACT = "#FF9800"   # active chip colour
 COL_VP_BAR   = "#1e3a50"   # volume profile bar (non-POC)
 COL_VP_POC   = "#FF9800"   # point of control
 
+# Simulated trade level line colours
+COL_TRADE_ENTRY = "#BBBBBB"   # entry price line
+COL_TRADE_SL    = "#FF5555"   # stop loss line
+COL_TRADE_TP    = "#44DD88"   # take profit line
+
+# Trade simulation parameters
+SL_BUFFER = 0.0    # extra points beyond wick tip placed on stop (0 = exact wick tip)
+RR_RATIO  = 2.0    # take-profit Risk:Reward multiplier (1:2)
+
 
 # ── Data classes ───────────────────────────────────────────────────────────────
 @dataclass
@@ -164,6 +175,25 @@ class Signal:
     direction:    str          # "BULL" or "BEAR"
     level:        float        # grabbed price level
     source:       str = "SWING"  # "SWING" | "4HH" | "4HL" | "PDH" | "PDL"
+
+
+@dataclass
+class SimTrade:
+    """One simulated liquidity-grab reversal trade."""
+    id:          str
+    symbol:      str
+    direction:   str            # "BULL" | "BEAR"
+    source:      str            # signal source tag
+    entry:       float          # signal candle close price
+    sl:          float          # stop loss price (at wick tip ± SL_BUFFER)
+    tp:          float          # take profit price (entry ± risk * RR_RATIO)
+    risk:        float          # |entry − sl| in price points
+    opened_at:   float          # unix timestamp of signal candle
+    opened_idx:  int            # absolute buffer index of the signal candle
+    status:      str = "OPEN"   # "OPEN" | "WIN" | "LOSS"
+    closed_at:   Optional[float] = None
+    closed_idx:  Optional[int]   = None
+    pnl:         float = 0.0    # realised P&L in price points
 
 
 @dataclass
@@ -187,6 +217,7 @@ class SymbolState:
     last_sig_key: tuple = ()
     last_update:  float = 0.0  # Unix timestamp of last UI update (throttle)
     key_levels:   KeyLevels = field(default_factory=KeyLevels)
+    sim_trades:   list = field(default_factory=list)  # list[SimTrade]
 
 
 # Module-level symbol cache – persists across symbol switches within a session
@@ -273,6 +304,53 @@ def _schedule_flush(symbol: str, candles: list) -> None:
         return
     _last_flush[symbol] = now
     threading.Thread(target=_save_cache, args=(symbol, candles), daemon=True).start()
+
+
+# ── Simulated trade filesystem cache ───────────────────────────────────────────
+_TRADES_DIR = Path.home() / ".mtrade" / "cache" / "sim_trades"
+
+
+def _trades_path(symbol: str) -> Path:
+    return _TRADES_DIR / f"{symbol.upper().lstrip('/')}.json"
+
+
+def _load_sim_trades(symbol: str) -> list:
+    """Load all persisted SimTrade records for *symbol*.  Returns [] on miss."""
+    try:
+        raw = json.loads(_trades_path(symbol).read_text(encoding="utf-8"))
+        trades = []
+        for d in raw:
+            trades.append(SimTrade(
+                id=d["id"], symbol=d["symbol"], direction=d["direction"],
+                source=d["source"], entry=d["entry"], sl=d["sl"], tp=d["tp"],
+                risk=d["risk"], opened_at=d["opened_at"], opened_idx=d["opened_idx"],
+                status=d.get("status", "OPEN"), closed_at=d.get("closed_at"),
+                closed_idx=d.get("closed_idx"), pnl=d.get("pnl", 0.0),
+            ))
+        return trades
+    except Exception:
+        return []
+
+
+def _save_sim_trades(symbol: str, trades: list) -> None:
+    """Persist all SimTrade records atomically."""
+    try:
+        _TRADES_DIR.mkdir(parents=True, exist_ok=True)
+        data = [
+            {
+                "id": t.id, "symbol": t.symbol, "direction": t.direction,
+                "source": t.source, "entry": t.entry, "sl": t.sl, "tp": t.tp,
+                "risk": t.risk, "opened_at": t.opened_at, "opened_idx": t.opened_idx,
+                "status": t.status, "closed_at": t.closed_at,
+                "closed_idx": t.closed_idx, "pnl": t.pnl,
+            }
+            for t in trades
+        ]
+        tmp = _trades_path(symbol).with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        tmp.replace(_trades_path(symbol))
+    except Exception:
+        pass
 
 
 # ── Demo data ──────────────────────────────────────────────────────────────────
@@ -557,6 +635,7 @@ def _build_chart(
     candle_step: int                  = CANDLE_STEP,
     price_scale: float                = 1.0,
     buf_start:   Optional[int]        = None,
+    sim_trades:  Optional[list]       = None,
 ) -> ft.Control:
     """Render the dark candlestick canvas with SMA lines and signal arrows."""
 
@@ -733,6 +812,65 @@ def _build_chart(
                 paint=ft.Paint(color=COL_SIG_BEAR, style=ft.PaintingStyle.FILL),
             ))
 
+    # ── Simulated trade levels: entry / SL / TP horizontal dashed lines ───────
+    if sim_trades:
+        for trade in sim_trades:
+            vi_open = trade.opened_idx - buf_offset
+            # Show trade if its open candle is visible on screen
+            if vi_open < 0 or vi_open >= len(visible):
+                continue
+            x_start = cx(vi_open)
+
+            # x_end: stop at the close candle (if resolved and visible) else right edge
+            if trade.closed_idx is not None:
+                vi_cl   = trade.closed_idx - buf_offset
+                x_end   = cx(vi_cl) if 0 <= vi_cl < len(visible) else float(chart_w - PAD_RIGHT)
+            else:
+                x_end   = float(chart_w - PAD_RIGHT)
+            x_end = min(x_end, float(chart_w - PAD_RIGHT))
+
+            sw = 1.5 if trade.status == "OPEN" else 0.8   # thinner once closed
+
+            for price_val, col, lbl in (
+                (trade.entry, COL_TRADE_ENTRY, "E"),
+                (trade.sl,    COL_TRADE_SL,    "SL"),
+                (trade.tp,    COL_TRADE_TP,    "TP"),
+            ):
+                if not (mn <= price_val <= mx):
+                    continue
+                y  = py(price_val)
+                kx = x_start
+                while kx < x_end:
+                    kx2 = min(kx + 6.0, x_end)
+                    shapes.append(cv.Line(
+                        x1=kx, y1=y, x2=kx2, y2=y,
+                        paint=ft.Paint(color=col, stroke_width=sw),
+                    ))
+                    kx += 10.0
+                # Small label anchored at the open candle
+                shapes.append(cv.Text(
+                    x=x_start + 2, y=y - 7,
+                    spans=[ft.TextSpan(lbl, style=ft.TextStyle(size=7, color=col))],
+                ))
+
+            # Result badge near the close candle
+            if trade.status in ("WIN", "LOSS") and trade.closed_idx is not None:
+                vi_cl = trade.closed_idx - buf_offset
+                if 0 <= vi_cl < len(visible):
+                    badge_price = trade.tp  if trade.status == "WIN" else trade.sl
+                    badge_col   = COL_TRADE_TP if trade.status == "WIN" else COL_TRADE_SL
+                    pnl_sign    = "+" if trade.pnl >= 0 else ""
+                    badge_lbl   = f"{'W' if trade.status == 'WIN' else 'L'} {pnl_sign}{trade.pnl:.1f}"
+                    if mn <= badge_price <= mx:
+                        shapes.append(cv.Text(
+                            x=cx(vi_cl) - 10, y=py(badge_price) - 14,
+                            spans=[ft.TextSpan(
+                                badge_lbl,
+                                style=ft.TextStyle(size=8, color=badge_col,
+                                                   weight=ft.FontWeight.BOLD),
+                            )],
+                        ))
+
     # In-chart legend (row 1: SMAs)
     lx, ly = PAD_LEFT + 4, PAD_TOP + 4
     shapes += [
@@ -804,11 +942,12 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
     symbol_field_ref    = ft.Ref[ft.TextField]()
     live_btn_ref        = ft.Ref[ft.TextButton]()
     zoom_lbl_ref        = ft.Ref[ft.Text]()
+    stats_ref           = ft.Ref[ft.Text]()
 
     # ── Dynamic chart dimensions ───────────────────────────────────────────────
     # Overhead: AppBar ~56px + padding 32px + header 70px + picker 40px +
-    #           spacing 50px + legend 28px + status 20px ≈ 296px
-    _OVERHEAD = 296
+    #           spacing 60px + legend 28px + stats 18px + status 20px ≈ 324px
+    _OVERHEAD = 324
 
     def _get_chart_dims() -> tuple[int, int, int]:
         """Return (chart_w, chart_h, n_visible) based on current page size."""
@@ -820,10 +959,15 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         return cw, ch, nv
 
     def _compute_buf_start(total: int, nv: int) -> int:
-        """Clamp view_offset and return the starting candle index for the viewport."""
-        max_off = max(0, total - nv)
+        """Clamp view_offset and return the starting candle index for the viewport.
+
+        LIVE_EDGE_PAD empty slots are kept on the right when at the live edge,
+        preventing the newest candle from bleeding to the right edge.
+        """
+        slots = nv - LIVE_EDGE_PAD          # data slots; right PAD slots stay empty at live
+        max_off = max(0, total - slots)
         view_offset[0] = min(view_offset[0], max_off)
-        return max(0, total - nv - view_offset[0])
+        return max(0, total - slots - view_offset[0])
 
     # ── Cache helpers ─────────────────────────────────────────────────────────
     def _state() -> SymbolState:
@@ -835,7 +979,9 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
     def _load_for_symbol(sym: str) -> None:
         """Ensure a SymbolState exists for sym.  Data is loaded by the stream loop."""
         if sym not in _symbol_cache:
-            _symbol_cache[sym] = SymbolState()
+            state = SymbolState()
+            state.sim_trades = _load_sim_trades(sym)
+            _symbol_cache[sym] = state
 
     # ── Demo banner ───────────────────────────────────────────────────────────
     def _demo_banner_widget(is_demo: bool) -> ft.Control:
@@ -886,6 +1032,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
                 candle_step=candle_w[0],
                 price_scale=price_scale[0],
                 buf_start=buf_start,
+                sim_trades=state.sim_trades,
             )
             chart_container_ref.current.update()
 
@@ -935,6 +1082,105 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         alert_ref.current.visible = False
         alert_ref.current.update()
 
+    # ── Trade simulation helpers ───────────────────────────────────────────────
+    def _open_sim_trade(sig: Signal, candles: list) -> None:
+        """Create a SimTrade for *sig* if one doesn't already exist for that candle."""
+        state = _state()
+        # Guard: skip if a trade is already tracked for this signal candle
+        if any(t.opened_idx == sig.candle_index for t in state.sim_trades):
+            return
+        if sig.candle_index >= len(candles):
+            return
+        c     = candles[sig.candle_index]
+        entry = c.close
+        if sig.direction == "BULL":
+            sl   = round(c.low  - SL_BUFFER, 4)
+            risk = round(entry - sl,  4)
+            tp   = round(entry + risk * RR_RATIO, 4)
+        else:
+            sl   = round(c.high + SL_BUFFER, 4)
+            risk = round(sl - entry, 4)
+            tp   = round(entry - risk * RR_RATIO, 4)
+        if risk <= 0:
+            return  # degenerate (flat) candle — skip
+        sym   = active_symbol[0]
+        trade = SimTrade(
+            id=uuid.uuid4().hex, symbol=sym,
+            direction=sig.direction, source=sig.source,
+            entry=entry, sl=sl, tp=tp, risk=risk,
+            opened_at=c.timestamp, opened_idx=sig.candle_index,
+        )
+        state.sim_trades.append(trade)
+        threading.Thread(
+            target=_save_sim_trades, args=(sym, state.sim_trades), daemon=True,
+        ).start()
+
+    def _resolve_open_trades(candles: list) -> None:
+        """Check every OPEN trade against completed candles and close if SL/TP hit."""
+        sym   = active_symbol[0]
+        state = _state()
+        changed = False
+        for trade in state.sim_trades:
+            if trade.status != "OPEN":
+                continue
+            # Only scan completed candles (exclude the last in-progress one)
+            for ci in range(trade.opened_idx + 1, len(candles) - 1):
+                c = candles[ci]
+                if trade.direction == "BULL":
+                    if c.low <= trade.sl:          # SL hit (takes priority)
+                        trade.status    = "LOSS"
+                        trade.pnl       = -trade.risk
+                        trade.closed_at  = c.timestamp
+                        trade.closed_idx = ci
+                        changed = True
+                        break
+                    if c.high >= trade.tp:         # TP hit
+                        trade.status    = "WIN"
+                        trade.pnl       = round(trade.risk * RR_RATIO, 4)
+                        trade.closed_at  = c.timestamp
+                        trade.closed_idx = ci
+                        changed = True
+                        break
+                else:  # BEAR
+                    if c.high >= trade.sl:         # SL hit (takes priority)
+                        trade.status    = "LOSS"
+                        trade.pnl       = -trade.risk
+                        trade.closed_at  = c.timestamp
+                        trade.closed_idx = ci
+                        changed = True
+                        break
+                    if c.low <= trade.tp:          # TP hit
+                        trade.status    = "WIN"
+                        trade.pnl       = round(trade.risk * RR_RATIO, 4)
+                        trade.closed_at  = c.timestamp
+                        trade.closed_idx = ci
+                        changed = True
+                        break
+        if changed:
+            threading.Thread(
+                target=_save_sim_trades, args=(sym, state.sim_trades), daemon=True,
+            ).start()
+
+    def _update_stats() -> None:
+        """Refresh the sim-trade stats row."""
+        if not stats_ref.current:
+            return
+        trades = _state().sim_trades
+        wins   = sum(1 for t in trades if t.status == "WIN")
+        losses = sum(1 for t in trades if t.status == "LOSS")
+        opens  = sum(1 for t in trades if t.status == "OPEN")
+        closed = wins + losses
+        acc    = (wins / closed * 100) if closed else 0.0
+        total_pnl = sum(t.pnl for t in trades)
+        pnl_str   = f"{total_pnl:+.2f}" if trades else "—"
+        acc_str   = f"{acc:.0f}%" if closed else "—"
+        stats_ref.current.value = (
+            f"Sim Trades:  {wins}W / {losses}L"
+            + (f" / {opens} open" if opens else "")
+            + f"    Accuracy: {acc_str}    P&L: {pnl_str} pts"
+        )
+        stats_ref.current.update()
+
     # ── UI update ─────────────────────────────────────────────────────────────
     def _update_ui() -> None:
         sym     = active_symbol[0]
@@ -952,6 +1198,13 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         sw_sigs = [s for s in detect_signals(candles) if s.candle_index not in kl_idxs]
         signals = kl_sigs + sw_sigs
 
+        # Open a simulated trade for every signal that doesn't have one yet
+        for sig in signals:
+            _open_sim_trade(sig, candles)
+
+        # Resolve any open trades against completed candles
+        _resolve_open_trades(candles)
+
         chart_w, chart_h, n_visible = _get_chart_dims()
         buf_start = _compute_buf_start(len(candles), n_visible)
 
@@ -963,8 +1216,12 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
                 candle_step=candle_w[0],
                 price_scale=price_scale[0],
                 buf_start=buf_start,
+                sim_trades=state.sim_trades,
             )
             chart_container_ref.current.update()
+
+        # Stats bar
+        _update_stats()
 
         # Chart area height (tracks dynamic chart_h)
         if chart_area_ref.current:
@@ -1437,6 +1694,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
                         candle_step=candle_w[0],
                         price_scale=price_scale[0],
                         buf_start=max(0, len(candles_init) - init_n_visible),
+                        sim_trades=_state().sim_trades,
                     ),
                 ),
                 alert_overlay,
@@ -1569,6 +1827,14 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
             # Legend
             legend,
+
+            # Sim trade stats
+            ft.Text(
+                ref=stats_ref,
+                value="Sim Trades:  0W / 0L    Accuracy: —    P&L: — pts",
+                size=11,
+                color=COL_LABEL,
+            ),
 
             # Status line
             ft.Text(
