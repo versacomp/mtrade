@@ -234,6 +234,8 @@ class SimTrade:
     # Ratcheting stop state
     sl_stage:    int            = 0     # 0=original  1=breakeven  2=trailing
     peak_price:  Optional[float] = None  # best price seen since entry (ratchet anchor)
+    # Live order tracking (empty for sim-only trades)
+    live_order_ids: list = field(default_factory=list)
 
 
 @dataclass
