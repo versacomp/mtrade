@@ -218,6 +218,10 @@ class SymbolState:
     last_update:  float = 0.0  # Unix timestamp of last UI update (throttle)
     key_levels:   KeyLevels = field(default_factory=KeyLevels)
     sim_trades:   list = field(default_factory=list)  # list[SimTrade]
+    # Cached render inputs — reused by lightweight pan/zoom redraws
+    cached_sma50:   list = field(default_factory=list)
+    cached_sma200:  list = field(default_factory=list)
+    cached_signals: list = field(default_factory=list)
 
 
 # Module-level symbol cache – persists across symbol switches within a session
@@ -1189,14 +1193,18 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         if not candles:
             return
 
-        sma50   = _compute_sma(candles, 50)
-        sma200  = _compute_sma(candles, 200)
-
         # Key-level grabs take priority; swing signals fill in non-overlapping candles
         kl_sigs = detect_key_level_signals(candles, state.key_levels)
         kl_idxs = {s.candle_index for s in kl_sigs}
         sw_sigs = [s for s in detect_signals(candles) if s.candle_index not in kl_idxs]
         signals = kl_sigs + sw_sigs
+
+        # Compute and cache — reused by lightweight pan/zoom redraws
+        sma50  = _compute_sma(candles, 50)
+        sma200 = _compute_sma(candles, 200)
+        state.cached_sma50   = sma50
+        state.cached_sma200  = sma200
+        state.cached_signals = signals
 
         # Open a simulated trade for every signal that doesn't have one yet
         for sig in signals:
@@ -1511,6 +1519,31 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
         _update_ui()
 
+    # ── Lightweight chart-only redraw (used by pan/zoom) ─────────────────────
+    def _redraw_chart() -> None:
+        """Rebuild canvas using cached SMA/signals — skips all expensive computation."""
+        state   = _state()
+        candles = list(state.buffer)
+        if not candles:
+            return
+        chart_w, chart_h, n_visible = _get_chart_dims()
+        buf_start = _compute_buf_start(len(candles), n_visible)
+        if chart_container_ref.current:
+            chart_container_ref.current.content = _build_chart(
+                candles,
+                state.cached_sma50, state.cached_sma200, state.cached_signals,
+                chart_w, chart_h, n_visible,
+                key_levels=state.key_levels,
+                candle_step=candle_w[0],
+                price_scale=price_scale[0],
+                buf_start=buf_start,
+                sim_trades=state.sim_trades,
+            )
+            chart_container_ref.current.update()
+        if live_btn_ref.current:
+            live_btn_ref.current.visible = view_offset[0] > 0
+            live_btn_ref.current.update()
+
     # ── Gesture handlers ──────────────────────────────────────────────────────
     def _on_pan_start(e) -> None:
         pan_accum[0] = 0.0
@@ -1524,7 +1557,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             total = len(list(_state().buffer))
             _, _, nv = _get_chart_dims()
             view_offset[0] = max(0, min(view_offset[0] + delta, max(0, total - nv)))
-            _update_ui()
+            _redraw_chart()
 
     def _on_scroll(e) -> None:
         sdx = e.scroll_delta.x if e.scroll_delta is not None else 0.0
@@ -1541,7 +1574,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             if zoom_lbl_ref.current:
                 zoom_lbl_ref.current.value = str(candle_w[0])
                 zoom_lbl_ref.current.update()
-        _update_ui()
+        _redraw_chart()
 
     # ── Zoom / live-edge helpers ───────────────────────────────────────────────
     def _zoom_x(delta: int) -> None:
@@ -1549,12 +1582,12 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         if zoom_lbl_ref.current:
             zoom_lbl_ref.current.value = str(candle_w[0])
             zoom_lbl_ref.current.update()
-        _update_ui()
+        _redraw_chart()
 
     def _zoom_y(delta: int) -> None:
         price_scale[0] = (min(8.0, price_scale[0] * 1.3)
                           if delta > 0 else max(0.2, price_scale[0] / 1.3))
-        _update_ui()
+        _redraw_chart()
 
     def _jump_to_live() -> None:
         view_offset[0] = 0
