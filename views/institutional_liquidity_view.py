@@ -828,19 +828,17 @@ def _build_chart(
 
     # ── Simulated trade levels: entry / SL / TP horizontal dashed lines ───────
     if sim_trades:
+        # Timestamp → visible-index map; immune to deque index shifts
+        ts_to_vi = {c.timestamp: i for i, c in enumerate(visible)}
         for trade in sim_trades:
-            vi_open = trade.opened_idx - buf_offset
-            # Show trade if its open candle is visible on screen
-            if vi_open < 0 or vi_open >= len(visible):
-                continue
+            vi_open = ts_to_vi.get(trade.opened_at)
+            if vi_open is None:
+                continue  # open candle not in current viewport
             x_start = cx(vi_open)
 
-            # x_end: stop at the close candle (if resolved and visible) else right edge
-            if trade.closed_idx is not None:
-                vi_cl   = trade.closed_idx - buf_offset
-                x_end   = cx(vi_cl) if 0 <= vi_cl < len(visible) else float(chart_w - PAD_RIGHT)
-            else:
-                x_end   = float(chart_w - PAD_RIGHT)
+            # x_end: stop at the close candle (by timestamp) if visible, else right edge
+            vi_cl = ts_to_vi.get(trade.closed_at) if trade.closed_at is not None else None
+            x_end = cx(vi_cl) if vi_cl is not None else float(chart_w - PAD_RIGHT)
             x_end = min(x_end, float(chart_w - PAD_RIGHT))
 
             sw = 1.5 if trade.status == "OPEN" else 0.8   # thinner once closed
@@ -868,22 +866,20 @@ def _build_chart(
                 ))
 
             # Result badge near the close candle
-            if trade.status in ("WIN", "LOSS") and trade.closed_idx is not None:
-                vi_cl = trade.closed_idx - buf_offset
-                if 0 <= vi_cl < len(visible):
-                    badge_price = trade.tp  if trade.status == "WIN" else trade.sl
-                    badge_col   = COL_TRADE_TP if trade.status == "WIN" else COL_TRADE_SL
-                    pnl_sign    = "+" if trade.pnl >= 0 else ""
-                    badge_lbl   = f"{'W' if trade.status == 'WIN' else 'L'} {pnl_sign}{trade.pnl:.1f}"
-                    if mn <= badge_price <= mx:
-                        shapes.append(cv.Text(
-                            x=cx(vi_cl) - 10, y=py(badge_price) - 14,
-                            spans=[ft.TextSpan(
-                                badge_lbl,
-                                style=ft.TextStyle(size=8, color=badge_col,
-                                                   weight=ft.FontWeight.BOLD),
-                            )],
-                        ))
+            if trade.status in ("WIN", "LOSS") and vi_cl is not None:
+                badge_price = trade.tp  if trade.status == "WIN" else trade.sl
+                badge_col   = COL_TRADE_TP if trade.status == "WIN" else COL_TRADE_SL
+                pnl_sign    = "+" if trade.pnl >= 0 else ""
+                badge_lbl   = f"{'W' if trade.status == 'WIN' else 'L'} {pnl_sign}{trade.pnl:.1f}"
+                if mn <= badge_price <= mx:
+                    shapes.append(cv.Text(
+                        x=cx(vi_cl) - 10, y=py(badge_price) - 14,
+                        spans=[ft.TextSpan(
+                            badge_lbl,
+                            style=ft.TextStyle(size=8, color=badge_col,
+                                               weight=ft.FontWeight.BOLD),
+                        )],
+                    ))
 
     # In-chart legend (row 1: SMAs)
     lx, ly = PAD_LEFT + 4, PAD_TOP + 4
@@ -1093,13 +1089,13 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
     # ── Trade simulation helpers ───────────────────────────────────────────────
     def _open_sim_trade(sig: Signal, candles: list) -> None:
         """Create a SimTrade for *sig* if one doesn't already exist for that candle."""
-        state = _state()
-        # Guard: skip if a trade is already tracked for this signal candle
-        if any(t.opened_idx == sig.candle_index for t in state.sim_trades):
-            return
         if sig.candle_index >= len(candles):
             return
         c     = candles[sig.candle_index]
+        state = _state()
+        # Guard by timestamp — buffer indices shift as the deque cycles; timestamps don't
+        if any(abs(t.opened_at - c.timestamp) < 1.0 for t in state.sim_trades):
+            return
         entry = c.close
         if sig.direction == "BULL":
             sl   = round(c.low  - SL_BUFFER, 4)
@@ -1127,41 +1123,43 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         """Check every OPEN trade against completed candles and close if SL/TP hit."""
         sym   = active_symbol[0]
         state = _state()
+        # Build a timestamp→index map once; avoids repeated linear searches
+        ts_to_idx = {c.timestamp: i for i, c in enumerate(candles)}
         changed = False
         for trade in state.sim_trades:
             if trade.status != "OPEN":
                 continue
-            # Only scan completed candles (exclude the last in-progress one)
-            for ci in range(trade.opened_idx + 1, len(candles) - 1):
+            # Locate the open candle by timestamp — immune to deque index shifts
+            open_pos = ts_to_idx.get(trade.opened_at)
+            if open_pos is None:
+                continue  # signal candle has scrolled out of the buffer
+            # Only scan completed candles after the open (exclude in-progress last candle)
+            for ci in range(open_pos + 1, len(candles) - 1):
                 c = candles[ci]
                 if trade.direction == "BULL":
                     if c.low <= trade.sl:          # SL hit (takes priority)
-                        trade.status    = "LOSS"
-                        trade.pnl       = -trade.risk
+                        trade.status     = "LOSS"
+                        trade.pnl        = -trade.risk
                         trade.closed_at  = c.timestamp
-                        trade.closed_idx = ci
                         changed = True
                         break
                     if c.high >= trade.tp:         # TP hit
-                        trade.status    = "WIN"
-                        trade.pnl       = round(trade.risk * RR_RATIO, 4)
+                        trade.status     = "WIN"
+                        trade.pnl        = round(trade.risk * RR_RATIO, 4)
                         trade.closed_at  = c.timestamp
-                        trade.closed_idx = ci
                         changed = True
                         break
                 else:  # BEAR
                     if c.high >= trade.sl:         # SL hit (takes priority)
-                        trade.status    = "LOSS"
-                        trade.pnl       = -trade.risk
+                        trade.status     = "LOSS"
+                        trade.pnl        = -trade.risk
                         trade.closed_at  = c.timestamp
-                        trade.closed_idx = ci
                         changed = True
                         break
                     if c.low <= trade.tp:          # TP hit
-                        trade.status    = "WIN"
-                        trade.pnl       = round(trade.risk * RR_RATIO, 4)
+                        trade.status     = "WIN"
+                        trade.pnl        = round(trade.risk * RR_RATIO, 4)
                         trade.closed_at  = c.timestamp
-                        trade.closed_idx = ci
                         changed = True
                         break
         if changed:
