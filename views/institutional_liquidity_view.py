@@ -490,15 +490,70 @@ def detect_signals(candles: list[Candle]) -> list[Signal]:
     return signals
 
 
+# ── Volume profile ─────────────────────────────────────────────────────────────
+def _build_volume_profile(
+    visible: list,
+    mn: float,
+    mx: float,
+    plot_h: float,
+) -> list:
+    """
+    Build left-anchored volume-profile horizontal bars.
+
+    Proxy volume: each candle distributes weight=1 evenly across every price bin
+    that falls within its [low, high] range.  The highest-volume bin (POC) is
+    highlighted in orange; all others use a dark teal.
+    """
+    if not visible or mx <= mn:
+        return []
+
+    price_range = mx - mn
+    bin_size    = price_range / VP_N_BINS
+    bins        = [0.0] * VP_N_BINS
+
+    for c in visible:
+        lo = max(c.low,  mn)
+        hi = min(c.high, mx)
+        if hi < lo:
+            continue
+        b0 = max(0,           int((lo - mn) / bin_size))
+        b1 = min(VP_N_BINS - 1, int((hi - mn) / bin_size))
+        n  = b1 - b0 + 1
+        w  = 1.0 / n if n > 0 else 0.0
+        for b in range(b0, b1 + 1):
+            bins[b] += w
+
+    max_vol = max(bins) or 1.0
+    poc_idx = bins.index(max_vol)
+    bin_h   = plot_h / VP_N_BINS
+
+    shapes = []
+    for b in range(VP_N_BINS):
+        if bins[b] < 0.01:
+            continue
+        bar_w = VP_MAX_W * bins[b] / max_vol
+        # bin 0 → lowest price → bottom of plot area
+        y_top = PAD_TOP + plot_h - (b + 1) * bin_h
+        color = COL_VP_POC if b == poc_idx else COL_VP_BAR
+        shapes.append(cv.Rect(
+            x=0, y=y_top,
+            width=bar_w, height=max(1.5, bin_h - 0.5),
+            paint=ft.Paint(color=color, style=ft.PaintingStyle.FILL),
+        ))
+
+    return shapes
+
+
 # ── Chart builder ──────────────────────────────────────────────────────────────
 def _build_chart(
-    candles:   list[Candle],
-    sma50:     list[Optional[float]],
-    sma200:    list[Optional[float]],
-    signals:   list[Signal],
-    chart_w:   int = CHART_W,
-    chart_h:   int = CHART_H,
-    n_visible: int = VISIBLE_CANDLES,
+    candles:    list[Candle],
+    sma50:      list[Optional[float]],
+    sma200:     list[Optional[float]],
+    signals:    list[Signal],
+    chart_w:    int                  = CHART_W,
+    chart_h:    int                  = CHART_H,
+    n_visible:  int                  = VISIBLE_CANDLES,
+    key_levels: Optional[KeyLevels]  = None,
 ) -> ft.Control:
     """Render the dark candlestick canvas with SMA lines and signal arrows."""
 
@@ -543,6 +598,9 @@ def _build_chart(
         x=0, y=0, width=chart_w, height=chart_h,
         paint=ft.Paint(color=COL_BG, style=ft.PaintingStyle.FILL),
     ))
+
+    # Volume profile (left-anchored, drawn under grid/labels)
+    shapes.extend(_build_volume_profile(visible, mn, mx, float(plot_h)))
 
     # Grid + price labels
     for gi in range(6):
