@@ -18,7 +18,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import flet as ft
 import flet.canvas as cv
@@ -271,6 +271,18 @@ class SymbolState:
 
 # Module-level symbol cache – persists across symbol switches within a session
 _symbol_cache: dict[str, SymbolState] = {}
+
+# ── Background stream / sim state (survives view navigation) ───────────────────
+# Keyed by symbol — prevents duplicate streams when user navigates back
+_active_stream_tasks: dict[str, "asyncio.Task"] = {}
+
+# The active view registers its _update_ui function here so the stream loop
+# always calls the *current* view's renderer, not a stale closure.
+# Set to None when no view is mounted (UI updates suppressed; trade logic pauses).
+_ui_refresh_hook: list[Optional[Callable]] = [None]
+
+# Global sim on/off toggle — False by default so trades only open when explicitly enabled
+_sim_enabled: bool = False
 
 
 # ── Filesystem candle cache ─────────────────────────────────────────────────────
@@ -1775,6 +1787,8 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
     live_btn_ref        = ft.Ref[ft.TextButton]()
     zoom_lbl_ref        = ft.Ref[ft.Text]()
     stats_ref           = ft.Ref[ft.Text]()
+    sim_icon_ref        = ft.Ref[ft.Icon]()
+    sim_lbl_ref         = ft.Ref[ft.Text]()
 
     # ── Dynamic chart dimensions ───────────────────────────────────────────────
     # Overhead: AppBar 56px + padding 32px + header 70px + picker 40px +
@@ -2026,6 +2040,10 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
           4. Timestamp duplicate guard (immune to deque index shifts).
           5. Execute the trade.
         """
+        # 0. Global sim toggle — no trades when sim is paused
+        if not _sim_enabled:
+            return
+
         # 1. Divergence gate
         if not sig.divergence:
             return
@@ -2209,6 +2227,21 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         state.re_entry_pending = False
         asyncio.create_task(_redraw_chart())
 
+    def _toggle_sim() -> None:
+        """Toggle the global sim on/off flag and refresh the indicator."""
+        global _sim_enabled
+        _sim_enabled = not _sim_enabled
+        if sim_icon_ref.current:
+            sim_icon_ref.current.name = (
+                ft.Icons.STOP_CIRCLE_OUTLINED if _sim_enabled else ft.Icons.PLAY_CIRCLE_OUTLINED
+            )
+            sim_icon_ref.current.color = COL_SIG_BULL if _sim_enabled else COL_LABEL
+            sim_icon_ref.current.update()
+        if sim_lbl_ref.current:
+            sim_lbl_ref.current.value = "SIM ON" if _sim_enabled else "SIM OFF"
+            sim_lbl_ref.current.color = COL_SIG_BULL if _sim_enabled else COL_LABEL
+            sim_lbl_ref.current.update()
+
     def _update_stats() -> None:
         """Refresh the sim-trade stats row."""
         if not stats_ref.current:
@@ -2230,6 +2263,13 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
     # ── UI update ─────────────────────────────────────────────────────────────
     async def _update_ui() -> None:
+        # Self-deregister if this view is no longer mounted (chart ref is gone).
+        # Prevents an orphaned closure from stealing the hook slot from a new view.
+        if chart_container_ref.current is None:
+            if _ui_refresh_hook[0] is _update_ui:
+                _ui_refresh_hook[0] = None
+            return
+
         sym     = active_symbol[0]
         state   = _state()
         candles = list(state.buffer)
@@ -2364,7 +2404,9 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         else:
             state.cur_high = max(state.cur_high or price, price)
             state.cur_low  = min(state.cur_low  or price, price)
-        asyncio.create_task(_update_ui())
+        hook = _ui_refresh_hook[0]
+        if hook is not None:
+            asyncio.create_task(hook())
 
     # ── DXLink candle event handler ───────────────────────────────────────────
     def _safe_float(v) -> Optional[float]:
@@ -2409,7 +2451,9 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         now = time.time()
         if now - state.last_update >= 0.5:
             state.last_update = now
-            asyncio.create_task(_update_ui())
+            hook = _ui_refresh_hook[0]
+            if hook is not None:
+                asyncio.create_task(hook())
 
         # Background filesystem flush (live candles only, throttled ≤ 1/30 s)
         if not state.demo_mode:
@@ -2446,7 +2490,9 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             )
 
         if state.buffer:
-            asyncio.create_task(_update_ui())  # show cached candles while connecting
+            hook = _ui_refresh_hook[0]
+            if hook is not None:
+                asyncio.create_task(hook())  # show cached candles while connecting
 
         # Resolve the streamer symbol once — stable for a given contract month.
         # If this fails the stream cannot start; fall straight through to demo.
@@ -2579,7 +2625,9 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
                 now = time.time()
                 state.min_start = now - (now % 60)
             _refresh_demo_banner()
-            asyncio.create_task(_update_ui())
+            hook = _ui_refresh_hook[0]
+            if hook is not None:
+                asyncio.create_task(hook())
 
             while sym == active_symbol[0]:
                 await asyncio.sleep(float(POLL_INTERVAL))
@@ -2599,9 +2647,13 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         if not new_sym or new_sym == active_symbol[0]:
             return
 
-        # Cancel the current stream / demo loop
-        if stream_task[0] is not None:
-            stream_task[0].cancel()
+        # Cancel the outgoing symbol's stream via the registry (not the closure ref,
+        # which may belong to a previous view instance for the same symbol).
+        old_task = _active_stream_tasks.pop(active_symbol[0], None)
+        if old_task is not None:
+            old_task.cancel()
+        elif stream_task[0] is not None:
+            stream_task[0].cancel()  # fallback: cancel whatever the closure knows about
 
         # Switch active symbol
         active_symbol[0] = new_sym
@@ -2612,9 +2664,15 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         # Clear last-signal key so a snackbar fires for this symbol's signals
         _state().last_sig_key = ()
 
-        # Start fresh stream loop
-        task = asyncio.create_task(_stream_loop())
-        stream_task[0] = task
+        # Start a new stream (or re-attach if one is already running for new_sym)
+        existing = _active_stream_tasks.get(new_sym)
+        if existing is not None and not existing.done():
+            stream_task[0] = existing
+        else:
+            task = asyncio.create_task(_stream_loop())
+            stream_task[0] = task
+            _active_stream_tasks[new_sym] = task
+            task.add_done_callback(lambda t, s=new_sym: _active_stream_tasks.pop(s, None))
 
         # Update symbol label and description in header
         if symbol_label_ref.current:
@@ -2743,8 +2801,25 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
     # ── Bootstrap ─────────────────────────────────────────────────────────────
     _load_for_symbol(DEFAULT_SYMBOL)
-    task = asyncio.create_task(_stream_loop())
-    stream_task[0] = task
+
+    # Register this view's _update_ui as the active UI hook.
+    # The stream event handlers call _ui_refresh_hook[0] instead of a closure-
+    # specific function, so whichever view is currently mounted gets the update.
+    _ui_refresh_hook[0] = _update_ui
+
+    sym0 = DEFAULT_SYMBOL
+    existing = _active_stream_tasks.get(sym0)
+    if existing is not None and not existing.done():
+        # A stream is already running for this symbol (user navigated back).
+        # Re-attach: reuse the existing task; trigger a redraw from cached state.
+        stream_task[0] = existing
+        asyncio.create_task(_update_ui())
+    else:
+        # No live stream — start one.
+        task = asyncio.create_task(_stream_loop())
+        stream_task[0] = task
+        _active_stream_tasks[sym0] = task
+        task.add_done_callback(lambda t, s=sym0: _active_stream_tasks.pop(s, None))
 
     # Wire up resize handler — rebuilds chart dimensions whenever window changes
     page.on_resized = lambda _: asyncio.create_task(_rebuild_chart_dims())
@@ -3030,9 +3105,31 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             # Legend
             legend,
 
-            # Sim trade stats + close-all button
+            # Sim trade stats row
             ft.Row(
                 [
+                    # Sim toggle — default OFF
+                    ft.IconButton(
+                        content=ft.Icon(
+                            ref=sim_icon_ref,
+                            name=ft.Icons.PLAY_CIRCLE_OUTLINED,
+                            color=COL_LABEL,
+                            size=20,
+                        ),
+                        tooltip="Enable / disable simulated trading",
+                        on_click=lambda e: _toggle_sim(),
+                        style=ft.ButtonStyle(
+                            padding=ft.padding.all(4),
+                        ),
+                    ),
+                    ft.Text(
+                        ref=sim_lbl_ref,
+                        value="SIM OFF",
+                        size=11,
+                        color=COL_LABEL,
+                        weight=ft.FontWeight.W_600,
+                    ),
+                    ft.Container(width=12),
                     ft.Text(
                         ref=stats_ref,
                         value="Sim Trades:  0W / 0L / 0 open    Accuracy: —    P&L: — pts",
