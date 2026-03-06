@@ -2,6 +2,7 @@
 
 import flet as ft
 
+import api.connection_status as cs
 from config import (
     TASTYTRADE_API_BASE,
     TASTYTRADE_CLIENT_ID,
@@ -38,8 +39,10 @@ def build_login_view(on_success, on_error) -> ft.View:
                 refresh_token=TASTYTRADE_REFRESH_TOKEN,
             )
             client._ensure_token()
+            cs.set_status(cs.ConnState.LIVE, "OAuth authenticated")
             on_success(client)
         except Exception as ex:
+            cs.set_status(cs.ConnState.OFFLINE, f"OAuth failed: {ex}")
             report_error(str(ex))
 
     def do_password_login(e: ft.ControlEvent) -> None:
@@ -53,8 +56,10 @@ def build_login_view(on_success, on_error) -> ft.View:
 
             client = TastytradeClient(TASTYTRADE_API_BASE)
             client.login(login_val, pwd_val)
+            cs.set_status(cs.ConnState.LIVE, "Authenticated")
             on_success(client)
         except Exception as ex:
+            cs.set_status(cs.ConnState.OFFLINE, f"Login failed: {ex}")
             report_error(str(ex))
 
     login_field = ft.TextField(

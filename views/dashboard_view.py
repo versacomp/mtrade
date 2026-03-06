@@ -3,6 +3,7 @@
 import asyncio
 import flet as ft
 
+import api.connection_status as cs
 from views.nav import nav_app_bar
 
 
@@ -29,6 +30,7 @@ def build_dashboard_view(client, page: ft.Page) -> ft.View:
 
     def fetch_quotes() -> None:
         nonlocal quotes
+        api_ok = False
         try:
             raw = client.get_market_quotes(symbols_to_fetch)
             quotes = {}
@@ -44,11 +46,15 @@ def build_dashboard_view(client, page: ft.Page) -> ft.View:
                     price = item.get("last-price") or item.get("last") or item.get("price")
                     if sym and price is not None:
                         quotes[sym] = float(price)
-        except Exception:
-            pass
+            if quotes:
+                api_ok = True
+        except Exception as exc:
+            cs.set_status(cs.ConnState.OFFLINE, f"REST API error: {exc}")
         # Demo data when API returns nothing
         if not quotes:
             quotes = {"SPY": 580.5, "QQQ": 520.3, "DIA": 430.2}
+        if api_ok:
+            cs.set_status(cs.ConnState.LIVE, "REST API connected")
 
     def build_quote_cards() -> list[ft.Control]:
         cards = []

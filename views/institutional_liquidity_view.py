@@ -23,6 +23,7 @@ from typing import Optional
 import flet as ft
 import flet.canvas as cv
 
+import api.connection_status as cs
 from api.dxlink_streamer import DXLinkStreamer
 from views.nav import nav_app_bar
 
@@ -1650,6 +1651,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
             streamer = DXLinkStreamer(dxlink_url, token)
             live_ok  = True
+            cs.set_status(cs.ConnState.LIVE, f"{sym} — DXLink streaming")
 
             def on_candle(candle_dict: dict) -> None:
                 _process_candle_event(sym, candle_dict)
@@ -1664,10 +1666,12 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             raise  # propagate — task was cancelled by symbol switch or page close
         except Exception as exc:
             log.warning("DXLink stream failed for %s: %s — switching to demo", sym, exc)
+            cs.set_status(cs.ConnState.OFFLINE, f"{sym} — stream error: {exc}")
 
         # ── Demo fallback ──────────────────────────────────────────────────
         if not live_ok and sym == active_symbol[0]:
             state.demo_mode = True
+            cs.set_status(cs.ConnState.DEMO, f"{sym} — demo data (DXLink unavailable)")
             if not state.buffer:
                 cached = _load_cache(sym)
                 if cached:
