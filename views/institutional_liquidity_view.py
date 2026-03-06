@@ -160,15 +160,25 @@ class Candle:
 
 @dataclass
 class Signal:
-    candle_index: int   # absolute index in the buffer list
-    direction: str      # "BULL" or "BEAR"
-    level: float        # grabbed price level
+    candle_index: int          # absolute index in the buffer list
+    direction:    str          # "BULL" or "BEAR"
+    level:        float        # grabbed price level
+    source:       str = "SWING"  # "SWING" | "4HH" | "4HL" | "PDH" | "PDL"
+
+
+@dataclass
+class KeyLevels:
+    """Key price levels used for liquidity-grab detection."""
+    h4_high: Optional[float] = None   # 4-hour session high
+    h4_low:  Optional[float] = None   # 4-hour session low
+    pd_high: Optional[float] = None   # previous day high
+    pd_low:  Optional[float] = None   # previous day low
 
 
 @dataclass
 class SymbolState:
     """All per-symbol runtime state.  Lives in the module-level cache."""
-    buffer:       deque = field(default_factory=lambda: deque(maxlen=BUFFER_MINUTES))
+    buffer:       deque     = field(default_factory=lambda: deque(maxlen=BUFFER_MINUTES))
     cur_open:     Optional[float] = None
     cur_high:     Optional[float] = None
     cur_low:      Optional[float] = None
@@ -176,6 +186,7 @@ class SymbolState:
     demo_mode:    bool  = False
     last_sig_key: tuple = ()
     last_update:  float = 0.0  # Unix timestamp of last UI update (throttle)
+    key_levels:   KeyLevels = field(default_factory=KeyLevels)
 
 
 # Module-level symbol cache – persists across symbol switches within a session
