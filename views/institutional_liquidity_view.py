@@ -2708,6 +2708,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         try:
             streamer_sym = client.get_futures_streamer_symbol(sym)
             log.info("DXLink streamer-symbol for %s → %s", sym, streamer_sym)
+            state.contract_sym = streamer_sym  # cache for live order placement
         except asyncio.CancelledError:
             raise
         except Exception as exc:
