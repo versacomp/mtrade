@@ -2293,6 +2293,163 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             sim_lbl_ref.current.color = COL_SIG_BULL if _sim_enabled else COL_LABEL
             sim_lbl_ref.current.update()
 
+    def _toggle_sim() -> None:
+        global _sim_enabled
+        _sim_enabled = not _sim_enabled
+        _sync_sim_ui()
+        if _sim_enabled:
+            _show_badge("PAPER TRADING", "#F9A825")
+        else:
+            _hide_badge()
+
+    # ── Live trading toggle ────────────────────────────────────────────────────
+    def _sync_live_ui() -> None:
+        if trade_live_btn_ref.current:
+            trade_live_btn_ref.current.icon = (
+                ft.Icons.SENSORS if _live_enabled else ft.Icons.SENSORS_OFF
+            )
+            trade_live_btn_ref.current.icon_color = "#C62828" if _live_enabled else COL_LABEL
+            trade_live_btn_ref.current.update()
+        if trade_live_lbl_ref.current:
+            trade_live_lbl_ref.current.value = "LIVE ON" if _live_enabled else "LIVE OFF"
+            trade_live_lbl_ref.current.color = "#C62828" if _live_enabled else COL_LABEL
+            trade_live_lbl_ref.current.update()
+
+    def _do_enable_live() -> None:
+        global _live_enabled, _sim_enabled
+        _live_enabled = True
+        # Pause and lock the sim toggle
+        _sim_enabled = False
+        _sync_sim_ui()
+        if sim_btn_ref.current:
+            sim_btn_ref.current.disabled = True
+            sim_btn_ref.current.update()
+        _sync_live_ui()
+        _show_badge("LIVE TRADING", "#C62828")
+
+    def _do_disable_live() -> None:
+        global _live_enabled
+        _live_enabled = False
+        # Re-enable the sim toggle
+        if sim_btn_ref.current:
+            sim_btn_ref.current.disabled = False
+            sim_btn_ref.current.update()
+        _sync_live_ui()
+        # Restore badge based on sim state
+        if _sim_enabled:
+            _show_badge("PAPER TRADING", "#F9A825")
+        else:
+            _hide_badge()
+
+    def _toggle_live() -> None:
+        if _live_enabled:
+            _do_disable_live()
+        else:
+            asyncio.create_task(_confirm_and_enable_live())
+
+    async def _confirm_and_enable_live() -> None:
+        """Show a confirmation dialog before enabling live trading."""
+        confirmed: list[bool] = [False]
+
+        def _on_confirm(e: ft.ControlEvent) -> None:
+            confirmed[0] = True
+            page.close(dlg)
+
+        def _on_cancel(e: ft.ControlEvent) -> None:
+            page.close(dlg)
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Row(
+                [ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, color="#C62828"),
+                 ft.Text("Enable Live Trading?", color="#C62828", weight=ft.FontWeight.BOLD)],
+                spacing=8,
+            ),
+            content=ft.Text(
+                "This will place REAL orders on TastyTrade.\n"
+                "Every Prime-tier signal that passes active filters\n"
+                "will immediately submit a market entry + SL + TP.",
+                size=13,
+            ),
+            actions=[
+                ft.TextButton("Cancel", on_click=_on_cancel),
+                ft.ElevatedButton(
+                    "Enable Live Trading",
+                    bgcolor="#C62828",
+                    color=ft.Colors.WHITE,
+                    on_click=_on_confirm,
+                ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        page.open(dlg)
+        await asyncio.sleep(0)   # yield so the dialog renders
+        # Wait for the dialog to be dismissed (poll since page.open is fire-and-forget)
+        while dlg in page.overlay:
+            await asyncio.sleep(0.05)
+        if confirmed[0]:
+            _do_enable_live()
+
+    # ── Live order placement ───────────────────────────────────────────────────
+    async def _place_live_orders(trade: SimTrade, contract_sym: str) -> None:
+        """Submit entry (Market) + SL (Stop) + TP (Limit) orders to TastyTrade."""
+        loop = asyncio.get_running_loop()
+
+        # Fetch and cache account number on first live trade
+        if not _live_account[0]:
+            try:
+                accounts = await loop.run_in_executor(None, client.get_accounts)
+                acct_items = [
+                    a.get("account", {}).get("account-number", "")
+                    for a in accounts
+                ]
+                _live_account[0] = next((a for a in acct_items if a), "")
+            except Exception as exc:
+                log.error("Live order: cannot fetch accounts — %s", exc)
+                return
+
+        acct = _live_account[0]
+        if not acct:
+            log.error("Live order: no account number available")
+            return
+
+        action_open  = "Buy to Open"   if trade.direction == "BULL" else "Sell to Open"
+        action_close = "Sell to Close" if trade.direction == "BULL" else "Buy to Close"
+
+        def _leg(action: str) -> dict:
+            return {
+                "instrument-type": "Future",
+                "symbol": contract_sym,
+                "quantity": 1,
+                "action": action,
+            }
+
+        orders_to_place = [
+            # 1. Entry — Market
+            {"time-in-force": "Day", "order-type": "Market",
+             "legs": [_leg(action_open)]},
+            # 2. Stop loss — Stop GTC
+            {"time-in-force": "GTC", "order-type": "Stop",
+             "stop-trigger": str(round(trade.sl, 4)),
+             "legs": [_leg(action_close)]},
+            # 3. Take profit — Limit GTC
+            {"time-in-force": "GTC", "order-type": "Limit",
+             "price": str(round(trade.tp, 4)),
+             "legs": [_leg(action_close)]},
+        ]
+
+        for body in orders_to_place:
+            try:
+                resp = await loop.run_in_executor(
+                    None, lambda b=body: client.place_order(acct, b)
+                )
+                oid = str(resp.get("order", {}).get("id", ""))
+                if oid:
+                    trade.live_order_ids.append(oid)
+                    log.info("Live order placed: id=%s type=%s", oid, body["order-type"])
+            except Exception as exc:
+                log.error("Live order failed (%s): %s", body.get("order-type"), exc)
+
     def _update_stats() -> None:
         """Refresh the sim-trade stats row."""
         if not stats_ref.current:
