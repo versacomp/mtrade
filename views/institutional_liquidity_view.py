@@ -722,7 +722,7 @@ def _build_chart(
                 paint=ft.Paint(color=COL_SIG_BEAR, style=ft.PaintingStyle.FILL),
             ))
 
-    # In-chart SMA legend
+    # In-chart legend (row 1: SMAs)
     lx, ly = PAD_LEFT + 4, PAD_TOP + 4
     shapes += [
         cv.Line(x1=lx,      y1=ly + 4, x2=lx + 12, y2=ly + 4,
@@ -733,6 +733,18 @@ def _build_chart(
                 paint=ft.Paint(color=COL_SMA200, stroke_width=2)),
         cv.Text(x=lx + 76,  y=ly - 2,
                 spans=[ft.TextSpan("SMA 200", style=ft.TextStyle(size=9, color=COL_SMA200))]),
+    ]
+    # In-chart legend (row 2: key levels)
+    ly2 = ly + 14
+    shapes += [
+        cv.Line(x1=lx,      y1=ly2 + 4, x2=lx + 12, y2=ly2 + 4,
+                paint=ft.Paint(color="#FFD700", stroke_width=1.5)),
+        cv.Text(x=lx + 14,  y=ly2 - 2,
+                spans=[ft.TextSpan("PDH/PDL", style=ft.TextStyle(size=9, color="#FFD700"))]),
+        cv.Line(x1=lx + 62, y1=ly2 + 4, x2=lx + 74, y2=ly2 + 4,
+                paint=ft.Paint(color="#909090", stroke_width=1.5)),
+        cv.Text(x=lx + 76,  y=ly2 - 2,
+                spans=[ft.TextSpan("4H H/L",  style=ft.TextStyle(size=9, color="#909090"))]),
     ]
 
     return cv.Canvas(shapes=shapes, width=chart_w, height=chart_h)
