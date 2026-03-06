@@ -1796,6 +1796,11 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
     stats_ref           = ft.Ref[ft.Text]()
     sim_btn_ref         = ft.Ref[ft.IconButton]()
     sim_lbl_ref         = ft.Ref[ft.Text]()
+    trade_live_btn_ref  = ft.Ref[ft.IconButton]()
+    trade_live_lbl_ref  = ft.Ref[ft.Text]()
+    badge_ref           = ft.Ref[ft.Container]()
+    badge_text_ref      = ft.Ref[ft.Text]()
+    throb_task: list[Optional[asyncio.Task]] = [None]
 
     # ── Dynamic chart dimensions ───────────────────────────────────────────────
     # Overhead: AppBar 56px + padding 32px + header 70px + picker 40px +
