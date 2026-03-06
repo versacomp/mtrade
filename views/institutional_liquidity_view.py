@@ -624,6 +624,33 @@ def _build_chart(
                 spans=[ft.TextSpan(label, style=ft.TextStyle(size=8, color=COL_LABEL))],
             ))
 
+    # Key levels: dashed horizontal lines for 4H H/L (gray) and PDH/PDL (gold)
+    if key_levels is not None:
+        for kl_attr, kl_color, kl_label in [
+            ("h4_high", "#909090", "4H H"),
+            ("h4_low",  "#909090", "4H L"),
+            ("pd_high", "#FFD700", "PDH"),
+            ("pd_low",  "#FFD700", "PDL"),
+        ]:
+            kl_price = getattr(key_levels, kl_attr, None)
+            if kl_price is None or not (mn <= kl_price <= mx):
+                continue
+            ky = py(kl_price)
+            # Dashed line: 8px on / 5px off
+            kx = float(PAD_LEFT)
+            while kx < chart_w - PAD_RIGHT:
+                kx2 = min(kx + 8, float(chart_w - PAD_RIGHT))
+                shapes.append(cv.Line(
+                    x1=kx, y1=ky, x2=kx2, y2=ky,
+                    paint=ft.Paint(color=kl_color, stroke_width=1.0),
+                ))
+                kx += 13.0
+            # Label at right edge of plot
+            shapes.append(cv.Text(
+                x=chart_w - PAD_RIGHT - 32, y=ky - 8,
+                spans=[ft.TextSpan(kl_label, style=ft.TextStyle(size=8, color=kl_color))],
+            ))
+
     # SMA 200 (blue)
     prev200: Optional[tuple[float, float]] = None
     for i, v in enumerate(vis_sma200):
