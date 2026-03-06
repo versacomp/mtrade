@@ -14,6 +14,7 @@ import logging.handlers
 import flet as ft
 
 import config
+from version import __version__
 
 from views.analysis_view import build_analysis_view
 from views.chart_view import build_chart_view
@@ -56,7 +57,7 @@ def _configure_logging() -> None:
 def main(page: ft.Page) -> None:
     """MTrade main app entry point."""
     _configure_logging()
-    page.title = "MTrade"
+    page.title = f"MTrade v{__version__}"
     _saved = config.get_pref("theme_mode", "system")
     page.theme_mode = {
         "dark":  ft.ThemeMode.DARK,
