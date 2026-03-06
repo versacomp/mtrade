@@ -151,15 +151,22 @@ COL_VP_BAR   = "#1e3a50"   # volume profile bar (non-POC)
 COL_VP_POC   = "#FF9800"   # point of control
 
 # Simulated trade level line colours
-COL_TRADE_ENTRY = "#BBBBBB"   # entry price line
-COL_TRADE_SL    = "#FF5555"   # stop loss line
-COL_TRADE_TP    = "#44DD88"   # take profit line
+COL_TRADE_ENTRY   = "#BBBBBB"   # entry price line
+COL_TRADE_SL      = "#FF5555"   # stop loss — stage 0 (original)
+COL_TRADE_SL_BE   = "#FFD700"   # stop loss — stage 1 (breakeven)
+COL_TRADE_SL_TRAIL= "#44DD88"   # stop loss — stage 2 (trailing profit lock)
+COL_TRADE_TP      = "#44DD88"   # take profit line
 
 # Trade simulation parameters
 SL_BUFFER       = 0.0    # extra points beyond wick tip placed on stop (0 = exact wick tip)
 RR_RATIO        = 2.0    # take-profit Risk:Reward multiplier (1:2)
 MAX_OPEN_TRADES = 1      # hard cap on concurrent open sim trades
 RE_ENTRY_DELAY  = 120    # seconds to wait before checking re-entry after an opposing flip
+
+# Ratcheting stop — profit-protection thresholds (fraction of TP distance from entry)
+BE_TRIGGER    = 0.50   # move SL to breakeven when price reaches 50 % of the way to TP
+TRAIL_TRIGGER = 0.75   # start trailing when price reaches 75 % of the way to TP
+TRAIL_OFFSET  = 0.50   # trailing SL sits risk × TRAIL_OFFSET below/above the peak price
 
 # DXLink reconnect / exponential back-off
 RECONNECT_BASE_DELAY = 5    # seconds before the first retry
@@ -213,6 +220,9 @@ class SimTrade:
     closed_at:   Optional[float] = None
     closed_idx:  Optional[int]   = None
     pnl:         float = 0.0    # realised P&L in price points
+    # Ratcheting stop state
+    sl_stage:    int            = 0     # 0=original  1=breakeven  2=trailing
+    peak_price:  Optional[float] = None  # best price seen since entry (ratchet anchor)
 
 
 @dataclass
@@ -351,6 +361,7 @@ def _load_sim_trades(symbol: str) -> list:
                 risk=d["risk"], opened_at=d["opened_at"], opened_idx=d["opened_idx"],
                 status=d.get("status", "OPEN"), closed_at=d.get("closed_at"),
                 closed_idx=d.get("closed_idx"), pnl=d.get("pnl", 0.0),
+                sl_stage=d.get("sl_stage", 0), peak_price=d.get("peak_price"),
             ))
         return trades
     except Exception:
@@ -368,6 +379,7 @@ def _save_sim_trades(symbol: str, trades: list) -> None:
                 "risk": t.risk, "opened_at": t.opened_at, "opened_idx": t.opened_idx,
                 "status": t.status, "closed_at": t.closed_at,
                 "closed_idx": t.closed_idx, "pnl": t.pnl,
+                "sl_stage": t.sl_stage, "peak_price": t.peak_price,
             }
             for t in trades
         ]
@@ -1010,9 +1022,17 @@ def _build_chart(
 
             sw = 1.5 if trade.status == "OPEN" else 0.8   # thinner once closed
 
+            # SL line color and label depend on the ratchet stage
+            sl_col = (COL_TRADE_SL_TRAIL if trade.sl_stage == 2
+                      else COL_TRADE_SL_BE if trade.sl_stage == 1
+                      else COL_TRADE_SL)
+            sl_lbl = ("TR" if trade.sl_stage == 2
+                      else "BE" if trade.sl_stage == 1
+                      else "SL")
+
             for price_val, col, lbl in (
                 (trade.entry, COL_TRADE_ENTRY, "E"),
-                (trade.sl,    COL_TRADE_SL,    "SL"),
+                (trade.sl,    sl_col,          sl_lbl),
                 (trade.tp,    COL_TRADE_TP,    "TP"),
             ):
                 if not (mn <= price_val <= mx):
@@ -1035,7 +1055,8 @@ def _build_chart(
             # Result badge near the close candle
             if trade.status in ("WIN", "LOSS") and vi_cl is not None:
                 badge_price = trade.tp  if trade.status == "WIN" else trade.sl
-                badge_col   = COL_TRADE_TP if trade.status == "WIN" else COL_TRADE_SL
+                badge_col   = (COL_TRADE_TP  if trade.status == "WIN"
+                               else sl_col)  # use stage color for SL-hit badges
                 pnl_sign    = "+" if trade.pnl >= 0 else ""
                 badge_lbl   = f"{'W' if trade.status == 'WIN' else 'L'} {pnl_sign}{trade.pnl:.1f}"
                 if mn <= badge_price <= mx:
@@ -1503,47 +1524,125 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         # 5. Execute
         _execute_trade(sig, candles)
 
-    def _resolve_open_trades(candles: list) -> None:
-        """Check every OPEN trade against completed candles and close if SL/TP hit."""
-        sym   = active_symbol[0]
-        state = _state()
-        # Build a timestamp→index map once; avoids repeated linear searches
+    def _update_trailing_stops(candles: list) -> None:
+        """
+        Ratchet stop losses for all OPEN trades based on price progress toward TP.
+
+        Stage 0 → 1 (Breakeven):  price reaches BE_TRIGGER    fraction of TP dist → SL = entry
+        Stage 1 → 2 (Trailing):   price reaches TRAIL_TRIGGER fraction of TP dist → trail SL
+          Trailing SL = peak ∓ risk × TRAIL_OFFSET, ratcheted so it only moves favorably.
+        """
+        state     = _state()
         ts_to_idx = {c.timestamp: i for i, c in enumerate(candles)}
-        changed = False
+        changed   = False
+
         for trade in state.sim_trades:
             if trade.status != "OPEN":
                 continue
-            # Locate the open candle by timestamp — immune to deque index shifts
             open_pos = ts_to_idx.get(trade.opened_at)
             if open_pos is None:
-                continue  # signal candle has scrolled out of the buffer
+                continue
+
+            tp_dist         = abs(trade.tp - trade.entry)
+            if tp_dist == 0:
+                continue
+            be_threshold    = BE_TRIGGER    * tp_dist
+            trail_threshold = TRAIL_TRIGGER * tp_dist
+
+            post_open = candles[open_pos:]   # includes the open candle itself
+
+            if trade.direction == "BULL":
+                peak     = max(c.high for c in post_open)
+                progress = peak - trade.entry
+
+                if progress >= trail_threshold:
+                    trail_sl = round(peak - trade.risk * TRAIL_OFFSET, 4)
+                    new_sl   = max(trade.sl, trail_sl)   # ratchet: only move up
+                    if trade.sl_stage < 2 or new_sl > trade.sl:
+                        trade.sl        = new_sl
+                        trade.sl_stage  = 2
+                        trade.peak_price = peak
+                        changed = True
+
+                elif progress >= be_threshold and trade.sl_stage < 1:
+                    trade.sl        = trade.entry
+                    trade.sl_stage  = 1
+                    trade.peak_price = peak
+                    changed = True
+
+            else:  # BEAR
+                peak     = min(c.low for c in post_open)
+                progress = trade.entry - peak
+
+                if progress >= trail_threshold:
+                    trail_sl = round(peak + trade.risk * TRAIL_OFFSET, 4)
+                    new_sl   = min(trade.sl, trail_sl)   # ratchet: only move down
+                    if trade.sl_stage < 2 or new_sl < trade.sl:
+                        trade.sl        = new_sl
+                        trade.sl_stage  = 2
+                        trade.peak_price = peak
+                        changed = True
+
+                elif progress >= be_threshold and trade.sl_stage < 1:
+                    trade.sl        = trade.entry
+                    trade.sl_stage  = 1
+                    trade.peak_price = peak
+                    changed = True
+
+        if changed:
+            sym = active_symbol[0]
+            threading.Thread(
+                target=_save_sim_trades, args=(sym, state.sim_trades), daemon=True,
+            ).start()
+
+    def _resolve_open_trades(candles: list) -> None:
+        """
+        Advance ratcheting stops, then check every OPEN trade for SL/TP hits.
+
+        P&L on an SL hit reflects the actual (possibly ratcheted) SL price rather than
+        the original risk, so a breakeven stop closes at 0 pts and a trailing stop
+        closes at a positive P&L when price reverses from a protected level.
+        """
+        _update_trailing_stops(candles)   # must run first so SL is current
+
+        sym   = active_symbol[0]
+        state = _state()
+        ts_to_idx = {c.timestamp: i for i, c in enumerate(candles)}
+        changed = False
+
+        for trade in state.sim_trades:
+            if trade.status != "OPEN":
+                continue
+            open_pos = ts_to_idx.get(trade.opened_at)
+            if open_pos is None:
+                continue
             # Only scan completed candles after the open (exclude in-progress last candle)
             for ci in range(open_pos + 1, len(candles) - 1):
                 c = candles[ci]
                 if trade.direction == "BULL":
-                    if c.low <= trade.sl:          # SL hit (takes priority)
-                        trade.status     = "LOSS"
-                        trade.pnl        = -trade.risk
-                        trade.closed_at  = c.timestamp
+                    if c.low <= trade.sl:          # SL hit — P&L from actual SL
+                        trade.status    = "WIN" if trade.sl > trade.entry else "LOSS"
+                        trade.pnl       = round(trade.sl - trade.entry, 4)
+                        trade.closed_at = c.timestamp
                         changed = True
                         break
                     if c.high >= trade.tp:         # TP hit
-                        trade.status     = "WIN"
-                        trade.pnl        = round(trade.risk * RR_RATIO, 4)
-                        trade.closed_at  = c.timestamp
+                        trade.status    = "WIN"
+                        trade.pnl       = round(trade.risk * RR_RATIO, 4)
+                        trade.closed_at = c.timestamp
                         changed = True
                         break
                 else:  # BEAR
-                    if c.high >= trade.sl:         # SL hit (takes priority)
-                        trade.status     = "LOSS"
-                        trade.pnl        = -trade.risk
-                        trade.closed_at  = c.timestamp
+                    if c.high >= trade.sl:         # SL hit — P&L from actual SL
+                        trade.status    = "WIN" if trade.sl < trade.entry else "LOSS"
+                        trade.pnl       = round(trade.entry - trade.sl, 4)
+                        trade.closed_at = c.timestamp
                         changed = True
                         break
                     if c.low <= trade.tp:          # TP hit
-                        trade.status     = "WIN"
-                        trade.pnl        = round(trade.risk * RR_RATIO, 4)
-                        trade.closed_at  = c.timestamp
+                        trade.status    = "WIN"
+                        trade.pnl       = round(trade.risk * RR_RATIO, 4)
+                        trade.closed_at = c.timestamp
                         changed = True
                         break
         if changed:
