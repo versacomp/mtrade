@@ -217,22 +217,53 @@ def _load_cache(symbol: str) -> list:
 
 
 def _save_cache(symbol: str, candles: list) -> None:
-    """Write candles atomically (tmp → rename). Called from daemon thread."""
+    """Write candles atomically, merging with existing file to retain 48 hours."""
     try:
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
         path = _cache_path(symbol)
-        tmp  = path.with_suffix(".tmp")
+        # Merge existing file + new buffer; buffer wins on same timestamp
+        merged: dict[float, Candle] = {}
+        try:
+            for c in json.loads(path.read_text(encoding="utf-8")):
+                merged[c["timestamp"]] = Candle(
+                    timestamp=c["timestamp"], open=c["open"],
+                    high=c["high"], low=c["low"], close=c["close"],
+                )
+        except Exception:
+            pass
+        for c in candles:
+            merged[c.timestamp] = c
+        cutoff  = time.time() - 48 * 3600
+        ordered = sorted(
+            (c for c in merged.values() if c.timestamp >= cutoff),
+            key=lambda c: c.timestamp,
+        )
+        tmp = path.with_suffix(".tmp")
         tmp.write_text(
             json.dumps([
                 {"timestamp": c.timestamp, "open": c.open,
                  "high": c.high, "low": c.low, "close": c.close}
-                for c in candles
+                for c in ordered
             ]),
             encoding="utf-8",
         )
         tmp.replace(path)
     except Exception as exc:
         log.warning("Candle cache write failed for %s: %s", symbol, exc)
+
+
+def _load_cache_full(symbol: str) -> list:
+    """Load all cached candles (up to 48 h) — used for key-level computation."""
+    try:
+        raw    = json.loads(_cache_path(symbol).read_text(encoding="utf-8"))
+        cutoff = time.time() - 48 * 3600
+        return [
+            Candle(timestamp=c["timestamp"], open=c["open"],
+                   high=c["high"], low=c["low"], close=c["close"])
+            for c in raw if c.get("timestamp", 0) >= cutoff
+        ]
+    except Exception:
+        return []
 
 
 def _schedule_flush(symbol: str, candles: list) -> None:
