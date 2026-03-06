@@ -161,6 +161,11 @@ RR_RATIO        = 2.0    # take-profit Risk:Reward multiplier (1:2)
 MAX_OPEN_TRADES = 1      # hard cap on concurrent open sim trades
 RE_ENTRY_DELAY  = 120    # seconds to wait before checking re-entry after an opposing flip
 
+# DXLink reconnect / exponential back-off
+RECONNECT_BASE_DELAY = 5    # seconds before the first retry
+RECONNECT_MAX_DELAY  = 60   # ceiling on back-off delay
+RECONNECT_MAX_TRIES  = 10   # attempts before giving up and switching to demo
+
 # RSI sub-panel
 RSI_PERIOD  = 14
 RSI_PANEL_H = 75   # pixel height of RSI sub-panel
@@ -1698,76 +1703,156 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         if not state.demo_mode:
             _schedule_flush(sym, list(state.buffer))
 
-    # ── Stream loop (DXLink → demo fallback) ─────────────────────────────────
+    # ── Stream loop (DXLink with exponential back-off → demo fallback) ───────
     async def _stream_loop() -> None:
         sym   = active_symbol[0]
         state = _state()
-        live_ok = False
-        try:
-            token_data  = client.get_quote_token()
-            token       = token_data.get("token") or token_data.get("dxlink-token", "")
-            dxlink_url  = (
-                token_data.get("dxlink-url")
-                or token_data.get("websocket-url", "")
-            )
-            if not token or not dxlink_url:
-                raise ValueError(f"Missing token/URL in quote token response: {token_data}")
 
-            # Look up the exact DXLink streamer-symbol (e.g. /MESU26:XCME)
+        # ── Phase 1: one-time setup per symbol activation ──────────────────
+        # Seed the in-memory buffer from the filesystem cache so the chart
+        # shows historical data immediately, before DXLink connects.
+        state.buffer.clear()
+        cached = _load_cache(sym)
+        if cached:
+            for c in cached:
+                state.buffer.append(c)
+            log.info("Seeded %d candles from cache for %s", len(cached), sym)
+        else:
+            log.info("No cache for %s; will request full 4h from DXLink", sym)
+
+        state.demo_mode = False
+        _refresh_demo_banner()
+
+        all_cached = _load_cache_full(sym)
+        if all_cached:
+            state.key_levels = _compute_key_levels(all_cached)
+            log.info(
+                "Key levels for %s: 4HH=%s 4HL=%s PDH=%s PDL=%s",
+                sym,
+                state.key_levels.h4_high, state.key_levels.h4_low,
+                state.key_levels.pd_high, state.key_levels.pd_low,
+            )
+
+        if state.buffer:
+            asyncio.create_task(_update_ui())  # show cached candles while connecting
+
+        # Resolve the streamer symbol once — stable for a given contract month.
+        # If this fails the stream cannot start; fall straight through to demo.
+        streamer_sym: Optional[str] = None
+        try:
             streamer_sym = client.get_futures_streamer_symbol(sym)
             log.info("DXLink streamer-symbol for %s → %s", sym, streamer_sym)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("Cannot resolve streamer symbol for %s: %s", sym, exc)
+            cs.set_status(cs.ConnState.OFFLINE, f"{sym} — cannot resolve symbol")
 
-            # ── Seed buffer from filesystem cache ──────────────────────────────
-            state.buffer.clear()
-            cached = _load_cache(sym)
-            if cached:
-                for c in cached:
-                    state.buffer.append(c)
-                from_time_ms = int(cached[-1].timestamp * 1000) + 1
-                log.info("Seeded %d candles from cache for %s; DXLink gap-fill from %d",
-                         len(cached), sym, from_time_ms)
-            else:
-                from_time_ms = int((time.time() - BUFFER_MINUTES * 60) * 1000)
-                log.info("No cache for %s; requesting full 4h from DXLink", sym)
+        # ── Phase 2: exponential back-off reconnect loop ───────────────────
+        attempt:      int   = 0      # consecutive failed attempts
+        connected_at: float = 0.0   # wall time when the stream last went LIVE
 
-            state.demo_mode = False
-            _refresh_demo_banner()
+        if streamer_sym is not None:
+            while sym == active_symbol[0]:
+                stream_exc:    Optional[Exception] = None
+                auth_rejected: bool                = False
 
-            # Compute key levels from the extended (48h) cache
-            all_cached = _load_cache_full(sym)
-            if all_cached:
-                state.key_levels = _compute_key_levels(all_cached)
-                log.info(
-                    "Key levels for %s: 4HH=%s 4HL=%s PDH=%s PDL=%s",
-                    sym,
-                    state.key_levels.h4_high, state.key_levels.h4_low,
-                    state.key_levels.pd_high, state.key_levels.pd_low,
+                try:
+                    # Fetch a fresh token every attempt — handles token expiry
+                    # that can occur during a prolonged network outage.
+                    token_data = client.get_quote_token()
+                    token      = (token_data.get("token")
+                                  or token_data.get("dxlink-token", ""))
+                    dxlink_url = (token_data.get("dxlink-url")
+                                  or token_data.get("websocket-url", ""))
+                    if not token or not dxlink_url:
+                        raise ValueError(
+                            f"Missing token/URL in quote token response: {token_data}"
+                        )
+
+                    # Gap-fill: request only candles newer than our last buffered one
+                    if state.buffer:
+                        from_time_ms = int(state.buffer[-1].timestamp * 1000) + 1
+                    else:
+                        from_time_ms = int((time.time() - BUFFER_MINUTES * 60) * 1000)
+
+                    streamer = DXLinkStreamer(dxlink_url, token)
+                    cs.set_status(cs.ConnState.LIVE, f"{sym} — DXLink streaming")
+                    connected_at = time.time()
+
+                    def on_candle(candle_dict: dict) -> None:
+                        _process_candle_event(sym, candle_dict)
+
+                    await streamer.stream_candles(
+                        symbol=streamer_sym,
+                        from_time_ms=from_time_ms,
+                        on_candle=on_candle,
+                    )
+
+                    # stream_candles returned normally — connection dropped
+                    # without raising.  Treat as a transient disconnect.
+                    stream_exc = ConnectionError("DXLink stream ended unexpectedly")
+
+                except asyncio.CancelledError:
+                    raise   # symbol switch or page close — do not retry
+
+                except RuntimeError as exc:
+                    if "AUTH token rejected" in str(exc):
+                        auth_rejected = True   # hard auth failure — no retry
+                    else:
+                        stream_exc = exc       # other RuntimeErrors are retryable
+
+                except Exception as exc:
+                    stream_exc = exc
+
+                # Hard auth failure: abort immediately, no demo here — the
+                # session is genuinely broken; user must re-authenticate.
+                if auth_rejected:
+                    log.error("DXLink AUTH rejected for %s — aborting", sym)
+                    cs.set_status(cs.ConnState.OFFLINE, f"{sym} — auth rejected")
+                    return   # leave demo_mode = False; chart shows last data
+
+                # A stream that ran for ≥ 60 s was healthy.  Reset the attempt
+                # counter so a brief outage after hours of uptime gets the full
+                # RECONNECT_MAX_TRIES retries rather than picking up mid-count.
+                if connected_at and time.time() - connected_at >= 60:
+                    attempt = 0
+                connected_at = 0.0
+
+                attempt += 1
+
+                if attempt > RECONNECT_MAX_TRIES or sym != active_symbol[0]:
+                    if attempt > RECONNECT_MAX_TRIES:
+                        log.warning(
+                            "DXLink exhausted %d retries for %s — demo fallback",
+                            RECONNECT_MAX_TRIES, sym,
+                        )
+                    break   # fall through to demo
+
+                delay = min(
+                    RECONNECT_BASE_DELAY * (2 ** (attempt - 1)),
+                    RECONNECT_MAX_DELAY,
+                )
+                delay += random.uniform(0, delay * 0.1)   # ±10 % jitter
+
+                cs.set_status(
+                    cs.ConnState.OFFLINE,
+                    f"{sym} — reconnecting {attempt}/{RECONNECT_MAX_TRIES}"
+                    f" in {delay:.0f}s"
+                    + (f" ({stream_exc})" if stream_exc else ""),
+                )
+                log.warning(
+                    "DXLink %s retry %d/%d in %.0fs — %s",
+                    sym, attempt, RECONNECT_MAX_TRIES, delay, stream_exc,
                 )
 
-            if state.buffer:
-                asyncio.create_task(_update_ui())   # render cached data immediately while DXLink connects
+                try:
+                    await asyncio.sleep(delay)
+                except asyncio.CancelledError:
+                    raise   # symbol switch during back-off sleep
 
-            streamer = DXLinkStreamer(dxlink_url, token)
-            live_ok  = True
-            cs.set_status(cs.ConnState.LIVE, f"{sym} — DXLink streaming")
-
-            def on_candle(candle_dict: dict) -> None:
-                _process_candle_event(sym, candle_dict)
-
-            await streamer.stream_candles(
-                symbol=streamer_sym,
-                from_time_ms=from_time_ms,
-                on_candle=on_candle,
-            )
-
-        except asyncio.CancelledError:
-            raise  # propagate — task was cancelled by symbol switch or page close
-        except Exception as exc:
-            log.warning("DXLink stream failed for %s: %s — switching to demo", sym, exc)
-            cs.set_status(cs.ConnState.OFFLINE, f"{sym} — stream error: {exc}")
-
-        # ── Demo fallback ──────────────────────────────────────────────────
-        if not live_ok and sym == active_symbol[0]:
+        # ── Demo fallback (retries exhausted or symbol unresolvable) ──────
+        if sym == active_symbol[0]:
             state.demo_mode = True
             cs.set_status(cs.ConnState.DEMO, f"{sym} — demo data (DXLink unavailable)")
             if not state.buffer:
@@ -1775,7 +1860,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
                 if cached:
                     for c in cached:
                         state.buffer.append(c)
-                    log.info("Demo mode seeded from cache: %d candles for %s", len(cached), sym)
+                    log.info("Demo seeded from cache: %d candles for %s", len(cached), sym)
                 else:
                     for c in _generate_demo_candles(sym):
                         state.buffer.append(c)
