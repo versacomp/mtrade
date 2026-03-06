@@ -1,10 +1,15 @@
 """Shared navigation for authenticated views."""
 
-import asyncio
-
 import flet as ft
 
 import api.connection_status as cs
+
+_NAV_ITEMS: list[tuple[str, str]] = [
+    ("Dashboard", "/dashboard"),
+    ("Chart",     "/chart"),
+    ("Liquidity", "/liquidity"),
+    ("Analysis",  "/analysis"),
+]
 
 
 def nav_app_bar(
@@ -15,8 +20,9 @@ def nav_app_bar(
 ) -> ft.AppBar:
     """AppBar with nav links, logout, and a live connection-status indicator."""
 
-    dot_ref = ft.Ref[ft.Container]()
-    lbl_ref = ft.Ref[ft.Text]()
+    dot_ref      = ft.Ref[ft.Container]()
+    lbl_ref      = ft.Ref[ft.Text]()
+    progress_ref = ft.Ref[ft.ProgressBar]()
 
     def _refresh(state: cs.ConnState, detail: str) -> None:
         """Called by connection_status whenever the state changes."""
@@ -39,25 +45,41 @@ def nav_app_bar(
     _init_state, _init_detail = cs.get()
     _init_color = cs.COLORS[_init_state]
 
+    # ── Nav buttons ────────────────────────────────────────────────────────────
+    nav_buttons: list[ft.Control] = []
+    for label, route in _NAV_ITEMS:
+        is_active = current_route == route
+
+        async def _navigate(e: ft.ControlEvent, _route: str = route) -> None:
+            # Immediate visual feedback: show progress bar while view rebuilds.
+            if progress_ref.current:
+                progress_ref.current.visible = True
+                progress_ref.current.update()
+            await page.push_route(_route)
+
+        btn = ft.TextButton(
+            label,
+            disabled=is_active,
+            style=ft.ButtonStyle(
+                color={
+                    ft.ControlState.DEFAULT:  ft.Colors.WHITE if is_active else ft.Colors.with_opacity(0.7, ft.Colors.WHITE),
+                    ft.ControlState.DISABLED: ft.Colors.WHITE,
+                },
+                bgcolor={
+                    ft.ControlState.DEFAULT:  ft.Colors.with_opacity(0.18, ft.Colors.WHITE) if is_active else ft.Colors.TRANSPARENT,
+                    ft.ControlState.HOVERED:  ft.Colors.with_opacity(0.12, ft.Colors.WHITE),
+                    ft.ControlState.DISABLED: ft.Colors.with_opacity(0.18, ft.Colors.WHITE),
+                },
+                overlay_color=ft.Colors.with_opacity(0.08, ft.Colors.WHITE),
+            ),
+            on_click=_navigate if not is_active else None,
+        )
+        nav_buttons.append(btn)
+
     return ft.AppBar(
         title=ft.Text(title),
         actions=[
-            ft.TextButton(
-                "Dashboard",
-                on_click=lambda _: asyncio.create_task(page.push_route("/dashboard")),
-            ),
-            ft.TextButton(
-                "Chart",
-                on_click=lambda _: asyncio.create_task(page.push_route("/chart")),
-            ),
-            ft.TextButton(
-                "Liquidity",
-                on_click=lambda _: asyncio.create_task(page.push_route("/liquidity")),
-            ),
-            ft.TextButton(
-                "Analysis",
-                on_click=lambda _: asyncio.create_task(page.push_route("/analysis")),
-            ),
+            *nav_buttons,
             ft.Container(width=12),
             # ── Status dot ────────────────────────────────────────────────────
             ft.Container(
@@ -85,9 +107,17 @@ def nav_app_bar(
                 tooltip="Sign out",
                 on_click=lambda _: (
                     cs.clear_listener(),
-                    asyncio.create_task(page.push_route("/")),
+                    page.run_task(page.push_route, "/"),
                     page.update(),
                 ),
             ),
         ],
+        # Thin indeterminate progress bar — visible only during navigation.
+        bottom=ft.ProgressBar(
+            ref=progress_ref,
+            visible=False,
+            color=ft.Colors.BLUE_300,
+            bgcolor=ft.Colors.TRANSPARENT,
+            value=None,  # indeterminate
+        ),
     )
