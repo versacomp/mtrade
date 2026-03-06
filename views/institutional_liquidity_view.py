@@ -1787,7 +1787,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
     live_btn_ref        = ft.Ref[ft.TextButton]()
     zoom_lbl_ref        = ft.Ref[ft.Text]()
     stats_ref           = ft.Ref[ft.Text]()
-    sim_icon_ref        = ft.Ref[ft.Icon]()
+    sim_btn_ref         = ft.Ref[ft.IconButton]()
     sim_lbl_ref         = ft.Ref[ft.Text]()
 
     # ── Dynamic chart dimensions ───────────────────────────────────────────────
@@ -2231,12 +2231,12 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         """Toggle the global sim on/off flag and refresh the indicator."""
         global _sim_enabled
         _sim_enabled = not _sim_enabled
-        if sim_icon_ref.current:
-            sim_icon_ref.current.name = (
+        if sim_btn_ref.current:
+            sim_btn_ref.current.icon = (
                 ft.Icons.STOP_CIRCLE_OUTLINED if _sim_enabled else ft.Icons.PLAY_CIRCLE_OUTLINED
             )
-            sim_icon_ref.current.color = COL_SIG_BULL if _sim_enabled else COL_LABEL
-            sim_icon_ref.current.update()
+            sim_btn_ref.current.icon_color = COL_SIG_BULL if _sim_enabled else COL_LABEL
+            sim_btn_ref.current.update()
         if sim_lbl_ref.current:
             sim_lbl_ref.current.value = "SIM ON" if _sim_enabled else "SIM OFF"
             sim_lbl_ref.current.color = COL_SIG_BULL if _sim_enabled else COL_LABEL
@@ -3110,12 +3110,10 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
                 [
                     # Sim toggle — default OFF
                     ft.IconButton(
-                        content=ft.Icon(
-                            ref=sim_icon_ref,
-                            name=ft.Icons.PLAY_CIRCLE_OUTLINED,
-                            color=COL_LABEL,
-                            size=20,
-                        ),
+                        ref=sim_btn_ref,
+                        icon=ft.Icons.PLAY_CIRCLE_OUTLINED,
+                        icon_color=COL_LABEL,
+                        icon_size=20,
                         tooltip="Enable / disable simulated trading",
                         on_click=lambda e: _toggle_sim(),
                         style=ft.ButtonStyle(
