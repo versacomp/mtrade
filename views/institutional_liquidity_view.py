@@ -3387,13 +3387,54 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
     )
 
+    # ── Bootstrap: restore badge on nav-back ──────────────────────────────────
+    async def _restore_badge() -> None:
+        await asyncio.sleep(0)   # yield so widgets are mounted
+        if _live_enabled:
+            _show_badge("LIVE TRADING", "#C62828")
+        elif _sim_enabled:
+            _show_badge("PAPER TRADING", "#F9A825")
+
+    asyncio.create_task(_restore_badge())
+
     return ft.View(
         route="/liquidity",
         bgcolor=COL_BG,
         controls=[
             nav_app_bar(page, "Institutional Liquidity", "/liquidity", username),
             ft.SafeArea(
-                content=ft.Container(content=body, expand=True, padding=16),
+                content=ft.Stack(
+                    [
+                        ft.Container(content=body, expand=True, padding=16),
+                        # ── Trading mode badge ─────────────────────────────────
+                        ft.Container(
+                            ref=badge_ref,
+                            content=ft.Row(
+                                [
+                                    ft.Icon(ft.Icons.CIRCLE, size=8, color=ft.Colors.WHITE),
+                                    ft.Text(
+                                        ref=badge_text_ref,
+                                        value="",
+                                        size=10,
+                                        color=ft.Colors.WHITE,
+                                        weight=ft.FontWeight.BOLD,
+                                    ),
+                                ],
+                                spacing=6,
+                                tight=True,
+                            ),
+                            bgcolor="#C62828",
+                            border_radius=16,
+                            padding=ft.padding.symmetric(horizontal=12, vertical=6),
+                            right=16,
+                            top=8,
+                            visible=False,
+                            opacity=1.0,
+                            animate_opacity=ft.Animation(300, ft.AnimationCurve.EASE_IN_OUT),
+                        ),
+                    ],
+                    expand=True,
+                ),
                 expand=True,
             ),
         ],
