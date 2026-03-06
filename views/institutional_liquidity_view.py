@@ -156,8 +156,10 @@ COL_TRADE_SL    = "#FF5555"   # stop loss line
 COL_TRADE_TP    = "#44DD88"   # take profit line
 
 # Trade simulation parameters
-SL_BUFFER = 0.0    # extra points beyond wick tip placed on stop (0 = exact wick tip)
-RR_RATIO  = 2.0    # take-profit Risk:Reward multiplier (1:2)
+SL_BUFFER       = 0.0    # extra points beyond wick tip placed on stop (0 = exact wick tip)
+RR_RATIO        = 2.0    # take-profit Risk:Reward multiplier (1:2)
+MAX_OPEN_TRADES = 1      # hard cap on concurrent open sim trades
+RE_ENTRY_DELAY  = 120    # seconds to wait before checking re-entry after an opposing flip
 
 # RSI sub-panel
 RSI_PERIOD  = 14
@@ -228,7 +230,8 @@ class SymbolState:
     last_sig_key: tuple = ()
     last_update:  float = 0.0  # Unix timestamp of last UI update (throttle)
     key_levels:   KeyLevels = field(default_factory=KeyLevels)
-    sim_trades:   list = field(default_factory=list)  # list[SimTrade]
+    sim_trades:       list = field(default_factory=list)  # list[SimTrade]
+    re_entry_pending: bool = False   # True while waiting for the RE_ENTRY_DELAY cooldown
     # Cached render inputs — reused by lightweight pan/zoom redraws
     cached_sma50:   list = field(default_factory=list)
     cached_sma200:  list = field(default_factory=list)
@@ -1288,22 +1291,19 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         alert_ref.current.update()
 
     # ── Trade simulation helpers ───────────────────────────────────────────────
-    def _open_sim_trade(sig: Signal, candles: list) -> None:
-        """Create a SimTrade for *sig* if RSI divergence is confirmed and no duplicate exists."""
-        # Only enter trades where RSI divergence confirms the reversal
-        if not sig.divergence:
-            return
+    def _execute_trade(sig: Signal, candles: list) -> None:
+        """
+        Mechanical trade creation — no guard logic.
+        Computes entry/SL/TP from the signal candle, appends the SimTrade,
+        and persists it.  Called by both the normal flow and the re-entry path.
+        """
         if sig.candle_index >= len(candles):
             return
         c     = candles[sig.candle_index]
-        state = _state()
-        # Guard by timestamp — buffer indices shift as the deque cycles; timestamps don't
-        if any(abs(t.opened_at - c.timestamp) < 1.0 for t in state.sim_trades):
-            return
         entry = c.close
         if sig.direction == "BULL":
             sl   = round(c.low  - SL_BUFFER, 4)
-            risk = round(entry - sl,  4)
+            risk = round(entry - sl, 4)
             tp   = round(entry + risk * RR_RATIO, 4)
         else:
             sl   = round(c.high + SL_BUFFER, 4)
@@ -1312,6 +1312,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         if risk <= 0:
             return  # degenerate (flat) candle — skip
         sym   = active_symbol[0]
+        state = _state()
         trade = SimTrade(
             id=uuid.uuid4().hex, symbol=sym,
             direction=sig.direction, source=sig.source,
@@ -1322,6 +1323,115 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         threading.Thread(
             target=_save_sim_trades, args=(sym, state.sim_trades), daemon=True,
         ).start()
+
+    def _close_at_market(trade: SimTrade, candles: list) -> None:
+        """
+        Close a specific OPEN trade at the current market price (last candle close).
+        Updates P&L, persists, and refreshes the stats row.
+        """
+        if not candles:
+            return
+        current = candles[-1]
+        if trade.direction == "BULL":
+            trade.pnl = round(current.close - trade.entry, 4)
+        else:
+            trade.pnl = round(trade.entry - current.close, 4)
+        trade.status    = "WIN" if trade.pnl >= 0 else "LOSS"
+        trade.closed_at = current.timestamp
+        sym = active_symbol[0]
+        threading.Thread(
+            target=_save_sim_trades, args=(sym, _state().sim_trades), daemon=True,
+        ).start()
+        _update_stats()
+
+    async def _re_entry_check(sig: Signal, sym: str) -> None:
+        """
+        Wait RE_ENTRY_DELAY seconds after an opposing-signal flip, then check
+        whether the original signal direction is still viable and, if so, open
+        a re-entry trade at the current candle.
+        """
+        await asyncio.sleep(RE_ENTRY_DELAY)
+
+        state = _state()
+        state.re_entry_pending = False   # always clear the flag on exit
+
+        # Abort if the user has switched to a different symbol
+        if active_symbol[0] != sym:
+            return
+
+        # Abort if a trade was already opened in the interim (e.g. by SL → new signal)
+        if any(t.status == "OPEN" for t in state.sim_trades):
+            return
+
+        candles = list(state.buffer)
+        if not candles:
+            return
+
+        last = candles[-1]
+        # Viability: price must still be on the correct side of the grabbed level
+        if sig.direction == "BULL" and last.close <= sig.level:
+            return   # price fell back below the swept low — setup invalidated
+        if sig.direction == "BEAR" and last.close >= sig.level:
+            return   # price climbed back above the swept high — setup invalidated
+
+        # Build a synthetic signal pointing at the current candle
+        re_sig = Signal(
+            candle_index=len(candles) - 1,
+            direction=sig.direction,
+            level=sig.level,
+            source=sig.source + "+RE",   # label distinguishes re-entries in chart/stats
+            divergence=True,             # inherited from the original RSI-confirmed signal
+        )
+        _execute_trade(re_sig, candles)
+        _update_stats()
+        asyncio.create_task(_update_ui())
+
+    def _open_sim_trade(sig: Signal, candles: list) -> None:
+        """
+        Gate-keeper for new sim trades.
+
+        Rules (in order):
+          1. RSI divergence must be confirmed.
+          2. Re-entry cooldown blocks any open during the delay window.
+          3. Hard cap: at most MAX_OPEN_TRADES open at once.
+             - Same direction as existing open → already in trade, skip.
+             - Opposing direction → close existing at market, start re-entry timer.
+          4. Timestamp duplicate guard (immune to deque index shifts).
+          5. Execute the trade.
+        """
+        # 1. Divergence gate
+        if not sig.divergence:
+            return
+
+        state = _state()
+
+        # 2. Re-entry cooldown gate
+        if state.re_entry_pending:
+            return
+
+        if sig.candle_index >= len(candles):
+            return
+
+        # 3. Open-trade cap
+        open_trades = [t for t in state.sim_trades if t.status == "OPEN"]
+        if len(open_trades) >= MAX_OPEN_TRADES:
+            existing = open_trades[0]
+            if existing.direction == sig.direction:
+                return  # already positioned in this direction — hold
+            # Opposing signal: flip the position
+            _close_at_market(existing, candles)
+            state.re_entry_pending = True
+            asyncio.create_task(_re_entry_check(sig, active_symbol[0]))
+            return  # do NOT open immediately — wait for re-entry check
+
+        c = candles[sig.candle_index]
+
+        # 4. Timestamp duplicate guard
+        if any(abs(t.opened_at - c.timestamp) < 1.0 for t in state.sim_trades):
+            return
+
+        # 5. Execute
+        _execute_trade(sig, candles)
 
     def _resolve_open_trades(candles: list) -> None:
         """Check every OPEN trade against completed candles and close if SL/TP hit."""
@@ -1373,30 +1483,18 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
     def _close_all_open_trades() -> None:
         """Manually close all OPEN sim trades at the current price."""
-        sym   = active_symbol[0]
-        state = _state()
+        state   = _state()
         candles = list(state.buffer)
         if not candles:
             return
-        current_price = candles[-1].close
-        changed = False
-        for trade in state.sim_trades:
-            if trade.status != "OPEN":
-                continue
-            if trade.direction == "BULL":
-                trade.pnl = round(current_price - trade.entry, 4)
-            else:
-                trade.pnl = round(trade.entry - current_price, 4)
-            trade.status    = "WIN" if trade.pnl >= 0 else "LOSS"
-            trade.closed_at  = candles[-1].timestamp
-            trade.closed_idx = len(candles) - 1
-            changed = True
-        if changed:
-            threading.Thread(
-                target=_save_sim_trades, args=(sym, state.sim_trades), daemon=True,
-            ).start()
-            _update_stats()
-            asyncio.create_task(_redraw_chart())
+        open_trades = [t for t in state.sim_trades if t.status == "OPEN"]
+        if not open_trades:
+            return
+        for trade in open_trades:
+            _close_at_market(trade, candles)
+        # Cancel any pending re-entry — user explicitly flattened the book
+        state.re_entry_pending = False
+        asyncio.create_task(_redraw_chart())
 
     def _update_stats() -> None:
         """Refresh the sim-trade stats row."""
