@@ -546,14 +546,17 @@ def _build_volume_profile(
 
 # ── Chart builder ──────────────────────────────────────────────────────────────
 def _build_chart(
-    candles:    list[Candle],
-    sma50:      list[Optional[float]],
-    sma200:     list[Optional[float]],
-    signals:    list[Signal],
-    chart_w:    int                  = CHART_W,
-    chart_h:    int                  = CHART_H,
-    n_visible:  int                  = VISIBLE_CANDLES,
-    key_levels: Optional[KeyLevels]  = None,
+    candles:     list[Candle],
+    sma50:       list[Optional[float]],
+    sma200:      list[Optional[float]],
+    signals:     list[Signal],
+    chart_w:     int                  = CHART_W,
+    chart_h:     int                  = CHART_H,
+    n_visible:   int                  = VISIBLE_CANDLES,
+    key_levels:  Optional[KeyLevels]  = None,
+    candle_step: int                  = CANDLE_STEP,
+    price_scale: float                = 1.0,
+    buf_start:   Optional[int]        = None,
 ) -> ft.Control:
     """Render the dark candlestick canvas with SMA lines and signal arrows."""
 
@@ -564,10 +567,16 @@ def _build_chart(
             alignment=ft.Alignment(0, 0),
         )
 
-    visible    = candles[-n_visible:]
-    vis_sma50  = (sma50  or [])[-n_visible:]
-    vis_sma200 = (sma200 or [])[-n_visible:]
-    buf_offset = len(candles) - len(visible)
+    total  = len(candles)
+    start  = max(0, min(
+        buf_start if buf_start is not None else max(0, total - n_visible),
+        max(0, total - n_visible),
+    ))
+    end        = min(total, start + n_visible)
+    visible    = candles[start:end]
+    vis_sma50  = (sma50  or [])[start:end]
+    vis_sma200 = (sma200 or [])[start:end]
+    buf_offset = start
 
     all_prices: list[float] = []
     for c in visible:
@@ -580,7 +589,7 @@ def _build_chart(
             all_prices.append(v)
 
     mn, mx     = min(all_prices), max(all_prices)
-    pad        = (mx - mn) * 0.08 or 2.0
+    pad        = (mx - mn) * 0.08 / price_scale or 2.0
     mn -= pad;  mx += pad
     price_range = mx - mn
     plot_h      = chart_h - PAD_TOP - PAD_BOTTOM
@@ -589,7 +598,7 @@ def _build_chart(
         return PAD_TOP + plot_h * (mx - price) / price_range
 
     def cx(i: int) -> float:
-        return PAD_LEFT + i * CANDLE_STEP + CANDLE_STEP / 2
+        return PAD_LEFT + i * candle_step + candle_step / 2
 
     shapes: list[cv.Shape] = []
 
@@ -615,9 +624,10 @@ def _build_chart(
             spans=[ft.TextSpan(f"{level:,.1f}", style=ft.TextStyle(size=9, color=COL_LABEL))],
         ))
 
-    # Time labels every 30 candles
+    # Time labels spaced ~200 px apart
+    lbl_every = max(5, 200 // candle_step)
     for i, c in enumerate(visible):
-        if i == 0 or i % 30 == 0 or i == len(visible) - 1:
+        if i == 0 or i % lbl_every == 0 or i == len(visible) - 1:
             label = datetime.fromtimestamp(c.timestamp).strftime("%H:%M")
             shapes.append(cv.Text(
                 x=cx(i) - 13, y=chart_h - PAD_BOTTOM + 5,
@@ -676,6 +686,7 @@ def _build_chart(
             prev50 = pt
 
     # Candles
+    body_w = max(1, int(candle_step * 0.55))
     for i, c in enumerate(visible):
         x     = cx(i)
         color = COL_BULL if c.close >= c.open else COL_BEAR
@@ -687,8 +698,8 @@ def _build_chart(
         body_bot = py(min(c.open, c.close))
         body_h   = max(1.5, body_bot - body_top)
         shapes.append(cv.Rect(
-            x=x - CANDLE_BODY_W / 2, y=body_top,
-            width=CANDLE_BODY_W, height=body_h,
+            x=x - body_w / 2, y=body_top,
+            width=body_w, height=body_h,
             paint=ft.Paint(color=color, style=ft.PaintingStyle.FILL),
         ))
 
@@ -772,6 +783,12 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
     sound_enabled: list[bool] = [True]
     alert_task:    list        = [None]  # list[asyncio.Task | None]
 
+    # ── Pan / zoom state ──────────────────────────────────────────────────────
+    view_offset: list[int]   = [0]            # candles offset from right edge (0 = live)
+    candle_w:    list[int]   = [CANDLE_STEP]  # horizontal px per candle (zoom X)
+    price_scale: list[float] = [1.0]          # Y zoom factor (>1 = tighter range)
+    pan_accum:   list[float] = [0.0]          # fractional sub-candle pan accumulator
+
     # ── UI refs ───────────────────────────────────────────────────────────────
     chart_container_ref = ft.Ref[ft.Container]()
     chart_area_ref      = ft.Ref[ft.Container]()
@@ -785,6 +802,8 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
     demo_banner_ref     = ft.Ref[ft.Container]()
     chip_row_ref        = ft.Ref[ft.Container]()
     symbol_field_ref    = ft.Ref[ft.TextField]()
+    live_btn_ref        = ft.Ref[ft.TextButton]()
+    zoom_lbl_ref        = ft.Ref[ft.Text]()
 
     # ── Dynamic chart dimensions ───────────────────────────────────────────────
     # Overhead: AppBar ~56px + padding 32px + header 70px + picker 40px +
@@ -797,8 +816,14 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         ph = max(400, int(page.height or 600))
         cw = pw - 32   # 16px padding each side
         ch = max(200, ph - _OVERHEAD)
-        nv = max(20, (cw - PAD_LEFT - PAD_RIGHT) // CANDLE_STEP)
+        nv = max(20, (cw - PAD_LEFT - PAD_RIGHT) // candle_w[0])
         return cw, ch, nv
+
+    def _compute_buf_start(total: int, nv: int) -> int:
+        """Clamp view_offset and return the starting candle index for the viewport."""
+        max_off = max(0, total - nv)
+        view_offset[0] = min(view_offset[0], max_off)
+        return max(0, total - nv - view_offset[0])
 
     # ── Cache helpers ─────────────────────────────────────────────────────────
     def _state() -> SymbolState:
@@ -854,9 +879,13 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             sw_sigs = [s for s in (detect_signals(candles) if candles else [])
                        if s.candle_index not in kl_idxs]
             signals = kl_sigs + sw_sigs
+            buf_start = _compute_buf_start(len(candles), n_visible)
             chart_container_ref.current.content = _build_chart(
                 candles, sma50, sma200, signals, chart_w, chart_h, n_visible,
                 key_levels=state.key_levels,
+                candle_step=candle_w[0],
+                price_scale=price_scale[0],
+                buf_start=buf_start,
             )
             chart_container_ref.current.update()
 
@@ -924,12 +953,16 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         signals = kl_sigs + sw_sigs
 
         chart_w, chart_h, n_visible = _get_chart_dims()
+        buf_start = _compute_buf_start(len(candles), n_visible)
 
         # Chart canvas
         if chart_container_ref.current:
             chart_container_ref.current.content = _build_chart(
                 candles, sma50, sma200, signals, chart_w, chart_h, n_visible,
                 key_levels=state.key_levels,
+                candle_step=candle_w[0],
+                price_scale=price_scale[0],
+                buf_start=buf_start,
             )
             chart_container_ref.current.update()
 
@@ -937,6 +970,11 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         if chart_area_ref.current:
             chart_area_ref.current.height = chart_h + 4
             chart_area_ref.current.update()
+
+        # Live button visibility
+        if live_btn_ref.current:
+            live_btn_ref.current.visible = view_offset[0] > 0
+            live_btn_ref.current.update()
 
         # Price
         if price_ref.current:
@@ -1216,6 +1254,52 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
         _update_ui()
 
+    # ── Gesture handlers ──────────────────────────────────────────────────────
+    def _on_pan_start(e) -> None:
+        pan_accum[0] = 0.0
+
+    def _on_pan_update(e) -> None:
+        pan_accum[0] += -e.delta_x          # drag left → positive → older data
+        delta = int(pan_accum[0] / candle_w[0])
+        if delta != 0:
+            pan_accum[0] -= delta * candle_w[0]
+            total = len(list(_state().buffer))
+            _, _, nv = _get_chart_dims()
+            view_offset[0] = max(0, min(view_offset[0] + delta, max(0, total - nv)))
+            _update_ui()
+
+    def _on_scroll(e) -> None:
+        if abs(e.scroll_delta_x) >= abs(e.scroll_delta_y):
+            # Horizontal component → pan time axis
+            total = len(list(_state().buffer))
+            _, _, nv = _get_chart_dims()
+            change = -1 if e.scroll_delta_x > 0 else 1   # right = newer = offset decreases
+            view_offset[0] = max(0, min(view_offset[0] + change, max(0, total - nv)))
+        else:
+            # Vertical component → zoom X  (up = zoom in = wider candles)
+            candle_w[0] = max(3, min(30, candle_w[0] + (1 if e.scroll_delta_y < 0 else -1)))
+            if zoom_lbl_ref.current:
+                zoom_lbl_ref.current.value = str(candle_w[0])
+                zoom_lbl_ref.current.update()
+        _update_ui()
+
+    # ── Zoom / live-edge helpers ───────────────────────────────────────────────
+    def _zoom_x(delta: int) -> None:
+        candle_w[0] = max(3, min(30, candle_w[0] + delta))
+        if zoom_lbl_ref.current:
+            zoom_lbl_ref.current.value = str(candle_w[0])
+            zoom_lbl_ref.current.update()
+        _update_ui()
+
+    def _zoom_y(delta: int) -> None:
+        price_scale[0] = (min(8.0, price_scale[0] * 1.3)
+                          if delta > 0 else max(0.2, price_scale[0] / 1.3))
+        _update_ui()
+
+    def _jump_to_live() -> None:
+        view_offset[0] = 0
+        _update_ui()
+
     # ── Chip row builder ──────────────────────────────────────────────────────
     def _build_chip_row() -> ft.Control:
         active  = active_symbol[0]
@@ -1347,6 +1431,9 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
                     content=_build_chart(
                         candles_init, sma50_init, sma200_init, signals_init,
                         init_chart_w, init_chart_h, init_n_visible,
+                        candle_step=candle_w[0],
+                        price_scale=price_scale[0],
+                        buf_start=max(0, len(candles_init) - init_n_visible),
                     ),
                 ),
                 alert_overlay,
@@ -1444,8 +1531,38 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             # Symbol picker
             symbol_picker,
 
-            # Candlestick chart
-            chart_area,
+            # Chart toolbar
+            ft.Row([
+                ft.Text("X:", size=11, color=COL_LABEL),
+                ft.IconButton(ft.Icons.REMOVE, icon_size=16, icon_color=COL_LABEL,
+                              tooltip="Zoom out candles", on_click=lambda e: _zoom_x(-1)),
+                ft.Text(ref=zoom_lbl_ref, value=str(CANDLE_STEP), size=11, color=COL_LABEL),
+                ft.IconButton(ft.Icons.ADD, icon_size=16, icon_color=COL_LABEL,
+                              tooltip="Zoom in candles", on_click=lambda e: _zoom_x(1)),
+                ft.Container(width=6),
+                ft.Text("Y:", size=11, color=COL_LABEL),
+                ft.IconButton(ft.Icons.UNFOLD_MORE, icon_size=16, icon_color=COL_LABEL,
+                              tooltip="Zoom out price", on_click=lambda e: _zoom_y(-1)),
+                ft.IconButton(ft.Icons.UNFOLD_LESS, icon_size=16, icon_color=COL_LABEL,
+                              tooltip="Zoom in price", on_click=lambda e: _zoom_y(1)),
+                ft.Container(expand=True),
+                ft.TextButton(
+                    ref=live_btn_ref,
+                    content=ft.Text("● LIVE", size=11, color=COL_CHIP_ACT,
+                                    weight=ft.FontWeight.W_600),
+                    visible=False,
+                    tooltip="Jump to live edge",
+                    on_click=lambda e: _jump_to_live(),
+                ),
+            ], spacing=0, vertical_alignment=ft.CrossAxisAlignment.CENTER, height=28),
+
+            # Candlestick chart wrapped in gesture detector
+            ft.GestureDetector(
+                content=chart_area,
+                on_pan_start=_on_pan_start,
+                on_pan_update=_on_pan_update,
+                on_scroll=_on_scroll,
+            ),
 
             # Legend
             legend,
