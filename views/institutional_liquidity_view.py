@@ -499,6 +499,16 @@ def _compute_sma(candles: list[Candle], period: int) -> list[Optional[float]]:
     return result
 
 
+def _compute_heavy(candles: list, key_levels: "KeyLevels") -> tuple:
+    """SMA + signal detection in one pass — safe to call from a thread executor."""
+    sma50   = _compute_sma(candles, 50)
+    sma200  = _compute_sma(candles, 200)
+    kl_sigs = detect_key_level_signals(candles, key_levels)
+    kl_idxs = {s.candle_index for s in kl_sigs}
+    sw_sigs = [s for s in detect_signals(candles) if s.candle_index not in kl_idxs]
+    return sma50, sma200, kl_sigs + sw_sigs
+
+
 def _swing_highs(candles: list[Candle], lookback: int = SWING_LOOKBACK) -> list[tuple[int, float]]:
     out: list[tuple[int, float]] = []
     limit = len(candles) - lookback
@@ -1011,7 +1021,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         )
 
     # ── Resize-only update ────────────────────────────────────────────────────
-    def _rebuild_chart_dims() -> None:
+    async def _rebuild_chart_dims() -> None:
         """Recompute chart dimensions and redraw canvas.  Safe to call with no data."""
         chart_w, chart_h, n_visible = _get_chart_dims()
 
@@ -1021,23 +1031,17 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
         state   = _state()
         candles = list(state.buffer)
-        if chart_container_ref.current:
-            sma50   = _compute_sma(candles, 50)   if candles else []
-            sma200  = _compute_sma(candles, 200)  if candles else []
-            kl_sigs = detect_key_level_signals(candles, state.key_levels) if candles else []
-            kl_idxs = {s.candle_index for s in kl_sigs}
-            sw_sigs = [s for s in (detect_signals(candles) if candles else [])
-                       if s.candle_index not in kl_idxs]
-            signals = kl_sigs + sw_sigs
-            buf_start = _compute_buf_start(len(candles), n_visible)
-            chart_container_ref.current.content = _build_chart(
-                candles, sma50, sma200, signals, chart_w, chart_h, n_visible,
-                key_levels=state.key_levels,
-                candle_step=candle_w[0],
-                price_scale=price_scale[0],
-                buf_start=buf_start,
-                sim_trades=state.sim_trades,
+        if chart_container_ref.current and candles:
+            loop = asyncio.get_running_loop()
+            buf_start   = _compute_buf_start(len(candles), n_visible)
+            chart_canvas = await loop.run_in_executor(
+                None, _build_chart,
+                candles,
+                state.cached_sma50, state.cached_sma200, state.cached_signals,
+                chart_w, chart_h, n_visible,
+                state.key_levels, candle_w[0], price_scale[0], buf_start, state.sim_trades,
             )
+            chart_container_ref.current.content = chart_canvas
             chart_container_ref.current.update()
 
         page.update()
@@ -1190,7 +1194,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
                 target=_save_sim_trades, args=(sym, state.sim_trades), daemon=True,
             ).start()
             _update_stats()
-            _redraw_chart()
+            asyncio.create_task(_redraw_chart())
 
     def _update_stats() -> None:
         """Refresh the sim-trade stats row."""
@@ -1213,67 +1217,57 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         stats_ref.current.update()
 
     # ── UI update ─────────────────────────────────────────────────────────────
-    def _update_ui() -> None:
+    async def _update_ui() -> None:
         sym     = active_symbol[0]
         state   = _state()
         candles = list(state.buffer)
         if not candles:
             return
 
-        # Key-level grabs take priority; swing signals fill in non-overlapping candles
-        kl_sigs = detect_key_level_signals(candles, state.key_levels)
-        kl_idxs = {s.candle_index for s in kl_sigs}
-        sw_sigs = [s for s in detect_signals(candles) if s.candle_index not in kl_idxs]
-        signals = kl_sigs + sw_sigs
+        loop = asyncio.get_running_loop()
 
-        # Compute and cache — reused by lightweight pan/zoom redraws
-        sma50  = _compute_sma(candles, 50)
-        sma200 = _compute_sma(candles, 200)
+        # Heavy computation off the event loop (SMA + signal detection)
+        sma50, sma200, signals = await loop.run_in_executor(
+            None, _compute_heavy, candles, state.key_levels,
+        )
         state.cached_sma50   = sma50
         state.cached_sma200  = sma200
         state.cached_signals = signals
 
-        # Open a simulated trade for every signal that doesn't have one yet
+        # Trade logic (fast — stays on event loop)
         for sig in signals:
             _open_sim_trade(sig, candles)
-
-        # Resolve any open trades against completed candles
         _resolve_open_trades(candles)
 
         chart_w, chart_h, n_visible = _get_chart_dims()
         buf_start = _compute_buf_start(len(candles), n_visible)
 
-        # Chart canvas
+        # Build canvas shapes off the event loop
+        chart_canvas = await loop.run_in_executor(
+            None, _build_chart,
+            candles, sma50, sma200, signals, chart_w, chart_h, n_visible,
+            state.key_levels, candle_w[0], price_scale[0], buf_start, state.sim_trades,
+        )
+
+        # ── UI updates (back on event loop) ───────────────────────────────────
         if chart_container_ref.current:
-            chart_container_ref.current.content = _build_chart(
-                candles, sma50, sma200, signals, chart_w, chart_h, n_visible,
-                key_levels=state.key_levels,
-                candle_step=candle_w[0],
-                price_scale=price_scale[0],
-                buf_start=buf_start,
-                sim_trades=state.sim_trades,
-            )
+            chart_container_ref.current.content = chart_canvas
             chart_container_ref.current.update()
 
-        # Stats bar
         _update_stats()
 
-        # Chart area height (tracks dynamic chart_h)
         if chart_area_ref.current:
             chart_area_ref.current.height = chart_h + 4
             chart_area_ref.current.update()
 
-        # Live button visibility
         if live_btn_ref.current:
             live_btn_ref.current.visible = view_offset[0] > 0
             live_btn_ref.current.update()
 
-        # Price
         if price_ref.current:
             price_ref.current.value = f"${candles[-1].close:,.2f}"
             price_ref.current.update()
 
-        # Signal text + snackbar on new signal
         if signals:
             latest  = signals[-1]
             key     = (latest.candle_index, latest.direction)
@@ -1299,7 +1293,6 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
                     open=True,
                 )
                 page.update()
-                # Cancel any running alert animation, then start a new one
                 if alert_task[0] is not None:
                     alert_task[0].cancel()
                 alert_task[0] = asyncio.create_task(
@@ -1354,7 +1347,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         else:
             state.cur_high = max(state.cur_high or price, price)
             state.cur_low  = min(state.cur_low  or price, price)
-        _update_ui()
+        asyncio.create_task(_update_ui())
 
     # ── DXLink candle event handler ───────────────────────────────────────────
     def _safe_float(v) -> Optional[float]:
@@ -1399,7 +1392,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         now = time.time()
         if now - state.last_update >= 0.5:
             state.last_update = now
-            _update_ui()
+            asyncio.create_task(_update_ui())
 
         # Background filesystem flush (live candles only, throttled ≤ 1/30 s)
         if not state.demo_mode:
@@ -1452,7 +1445,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
                 )
 
             if state.buffer:
-                _update_ui()   # render cached data immediately while DXLink connects
+                asyncio.create_task(_update_ui())   # render cached data immediately while DXLink connects
 
             streamer = DXLinkStreamer(dxlink_url, token)
             live_ok  = True
@@ -1486,7 +1479,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
                 now = time.time()
                 state.min_start = now - (now % 60)
             _refresh_demo_banner()
-            _update_ui()
+            asyncio.create_task(_update_ui())
 
             while sym == active_symbol[0]:
                 await asyncio.sleep(float(POLL_INTERVAL))
@@ -1547,7 +1540,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         _update_ui()
 
     # ── Lightweight chart-only redraw (used by pan/zoom) ─────────────────────
-    def _redraw_chart() -> None:
+    async def _redraw_chart() -> None:
         """Rebuild canvas using cached SMA/signals — skips all expensive computation."""
         state   = _state()
         candles = list(state.buffer)
@@ -1555,27 +1548,26 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             return
         chart_w, chart_h, n_visible = _get_chart_dims()
         buf_start = _compute_buf_start(len(candles), n_visible)
+        loop = asyncio.get_running_loop()
+        chart_canvas = await loop.run_in_executor(
+            None, _build_chart,
+            candles,
+            state.cached_sma50, state.cached_sma200, state.cached_signals,
+            chart_w, chart_h, n_visible,
+            state.key_levels, candle_w[0], price_scale[0], buf_start, state.sim_trades,
+        )
         if chart_container_ref.current:
-            chart_container_ref.current.content = _build_chart(
-                candles,
-                state.cached_sma50, state.cached_sma200, state.cached_signals,
-                chart_w, chart_h, n_visible,
-                key_levels=state.key_levels,
-                candle_step=candle_w[0],
-                price_scale=price_scale[0],
-                buf_start=buf_start,
-                sim_trades=state.sim_trades,
-            )
+            chart_container_ref.current.content = chart_canvas
             chart_container_ref.current.update()
         if live_btn_ref.current:
             live_btn_ref.current.visible = view_offset[0] > 0
             live_btn_ref.current.update()
 
     # ── Gesture handlers ──────────────────────────────────────────────────────
-    def _on_pan_start(e) -> None:
+    async def _on_pan_start(e) -> None:
         pan_accum[0] = 0.0
 
-    def _on_pan_update(e) -> None:
+    async def _on_pan_update(e) -> None:
         dx = e.local_delta.x if e.local_delta is not None else 0.0
         pan_accum[0] += -dx                  # drag left → positive → older data
         delta = int(pan_accum[0] / candle_w[0])
@@ -1584,9 +1576,9 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             total = len(list(_state().buffer))
             _, _, nv = _get_chart_dims()
             view_offset[0] = max(0, min(view_offset[0] + delta, max(0, total - nv)))
-            _redraw_chart()
+            await _redraw_chart()
 
-    def _on_scroll(e) -> None:
+    async def _on_scroll(e) -> None:
         sdx = e.scroll_delta.x if e.scroll_delta is not None else 0.0
         sdy = e.scroll_delta.y if e.scroll_delta is not None else 0.0
         if abs(sdx) >= abs(sdy):
@@ -1601,7 +1593,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             if zoom_lbl_ref.current:
                 zoom_lbl_ref.current.value = str(candle_w[0])
                 zoom_lbl_ref.current.update()
-        _redraw_chart()
+        await _redraw_chart()
 
     # ── Zoom / live-edge helpers ───────────────────────────────────────────────
     def _zoom_x(delta: int) -> None:
@@ -1609,16 +1601,16 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         if zoom_lbl_ref.current:
             zoom_lbl_ref.current.value = str(candle_w[0])
             zoom_lbl_ref.current.update()
-        _redraw_chart()
+        asyncio.create_task(_redraw_chart())
 
     def _zoom_y(delta: int) -> None:
         price_scale[0] = (min(8.0, price_scale[0] * 1.3)
                           if delta > 0 else max(0.2, price_scale[0] / 1.3))
-        _redraw_chart()
+        asyncio.create_task(_redraw_chart())
 
     def _jump_to_live() -> None:
         view_offset[0] = 0
-        _update_ui()
+        asyncio.create_task(_update_ui())
 
     # ── Chip row builder ──────────────────────────────────────────────────────
     def _build_chip_row() -> ft.Control:
@@ -1653,7 +1645,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
     stream_task[0] = task
 
     # Wire up resize handler — rebuilds chart dimensions whenever window changes
-    page.on_resized = lambda _: _rebuild_chart_dims()
+    page.on_resized = lambda _: asyncio.create_task(_rebuild_chart_dims())
 
     # Initial display — buffer is empty until DXLink delivers first candles
     init_chart_w, init_chart_h, init_n_visible = _get_chart_dims()
