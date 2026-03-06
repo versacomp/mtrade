@@ -3317,23 +3317,40 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             # Sim trade stats row
             ft.Row(
                 [
-                    # Sim toggle — default OFF
+                    # Sim (paper) toggle
                     ft.IconButton(
                         ref=sim_btn_ref,
-                        icon=ft.Icons.PLAY_CIRCLE_OUTLINED,
-                        icon_color=COL_LABEL,
+                        icon=ft.Icons.STOP_CIRCLE_OUTLINED if _sim_enabled else ft.Icons.PLAY_CIRCLE_OUTLINED,
+                        icon_color=COL_SIG_BULL if _sim_enabled else COL_LABEL,
                         icon_size=20,
-                        tooltip="Enable / disable simulated trading",
+                        disabled=_live_enabled,
+                        tooltip="Enable / disable paper trading",
                         on_click=lambda e: _toggle_sim(),
-                        style=ft.ButtonStyle(
-                            padding=ft.padding.all(4),
-                        ),
+                        style=ft.ButtonStyle(padding=ft.padding.all(4)),
                     ),
                     ft.Text(
                         ref=sim_lbl_ref,
-                        value="SIM OFF",
+                        value="SIM ON" if _sim_enabled else "SIM OFF",
                         size=11,
-                        color=COL_LABEL,
+                        color=COL_SIG_BULL if _sim_enabled else COL_LABEL,
+                        weight=ft.FontWeight.W_600,
+                    ),
+                    ft.Container(width=8),
+                    # Live trading toggle
+                    ft.IconButton(
+                        ref=trade_live_btn_ref,
+                        icon=ft.Icons.SENSORS if _live_enabled else ft.Icons.SENSORS_OFF,
+                        icon_color="#C62828" if _live_enabled else COL_LABEL,
+                        icon_size=20,
+                        tooltip="Enable / disable live trading on TastyTrade",
+                        on_click=lambda e: _toggle_live(),
+                        style=ft.ButtonStyle(padding=ft.padding.all(4)),
+                    ),
+                    ft.Text(
+                        ref=trade_live_lbl_ref,
+                        value="LIVE ON" if _live_enabled else "LIVE OFF",
+                        size=11,
+                        color="#C62828" if _live_enabled else COL_LABEL,
                         weight=ft.FontWeight.W_600,
                     ),
                     ft.Container(width=12),
