@@ -960,8 +960,8 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
     # ── Dynamic chart dimensions ───────────────────────────────────────────────
     # Overhead: AppBar 56px + padding 32px + header 70px + picker 40px +
-    #           toolbar 28px + 7×spacing 70px + legend 35px + stats row 32px + status 18px ≈ 381px
-    _OVERHEAD = 390
+    #           toolbar 28px + 7×spacing 70px + legend 35px + stats row 40px + status 18px ≈ 389px
+    _OVERHEAD = 430
 
     def _get_chart_dims() -> tuple[int, int, int]:
         """Return (chart_w, chart_h, n_visible) based on current page size."""
@@ -1210,9 +1210,8 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         pnl_str   = f"{total_pnl:+.2f}" if trades else "—"
         acc_str   = f"{acc:.0f}%" if closed else "—"
         stats_ref.current.value = (
-            f"Sim Trades:  {wins}W / {losses}L"
-            + (f" / {opens} open" if opens else "")
-            + f"    Accuracy: {acc_str}    P&L: {pnl_str} pts"
+            f"Sim Trades:  {wins}W / {losses}L / {opens} open"
+            f"    Accuracy: {acc_str}    P&L: {pnl_str} pts"
         )
         stats_ref.current.update()
 
@@ -1885,7 +1884,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
                 [
                     ft.Text(
                         ref=stats_ref,
-                        value="Sim Trades:  0W / 0L    Accuracy: —    P&L: — pts",
+                        value="Sim Trades:  0W / 0L / 0 open    Accuracy: —    P&L: — pts",
                         size=11,
                         color=COL_LABEL,
                     ),
