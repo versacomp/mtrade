@@ -1165,6 +1165,33 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
                 target=_save_sim_trades, args=(sym, state.sim_trades), daemon=True,
             ).start()
 
+    def _close_all_open_trades() -> None:
+        """Manually close all OPEN sim trades at the current price."""
+        sym   = active_symbol[0]
+        state = _state()
+        candles = list(state.buffer)
+        if not candles:
+            return
+        current_price = candles[-1].close
+        changed = False
+        for trade in state.sim_trades:
+            if trade.status != "OPEN":
+                continue
+            if trade.direction == "BULL":
+                trade.pnl = round(current_price - trade.entry, 4)
+            else:
+                trade.pnl = round(trade.entry - current_price, 4)
+            trade.status    = "WIN" if trade.pnl >= 0 else "LOSS"
+            trade.closed_at  = candles[-1].timestamp
+            trade.closed_idx = len(candles) - 1
+            changed = True
+        if changed:
+            threading.Thread(
+                target=_save_sim_trades, args=(sym, state.sim_trades), daemon=True,
+            ).start()
+            _update_stats()
+            _redraw_chart()
+
     def _update_stats() -> None:
         """Refresh the sim-trade stats row."""
         if not stats_ref.current:
@@ -1861,12 +1888,27 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             # Legend
             legend,
 
-            # Sim trade stats
-            ft.Text(
-                ref=stats_ref,
-                value="Sim Trades:  0W / 0L    Accuracy: —    P&L: — pts",
-                size=11,
-                color=COL_LABEL,
+            # Sim trade stats + close-all button
+            ft.Row(
+                [
+                    ft.Text(
+                        ref=stats_ref,
+                        value="Sim Trades:  0W / 0L    Accuracy: —    P&L: — pts",
+                        size=11,
+                        color=COL_LABEL,
+                    ),
+                    ft.Container(expand=True),
+                    ft.TextButton(
+                        "Close All",
+                        style=ft.ButtonStyle(
+                            color=COL_BEAR,
+                            padding=ft.padding.symmetric(horizontal=8, vertical=2),
+                        ),
+                        tooltip="Close all open sim trades at current price",
+                        on_click=lambda e: _close_all_open_trades(),
+                    ),
+                ],
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
 
             # Status line
