@@ -849,9 +849,14 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         if chart_container_ref.current:
             sma50   = _compute_sma(candles, 50)   if candles else []
             sma200  = _compute_sma(candles, 200)  if candles else []
-            signals = detect_signals(candles)     if candles else []
+            kl_sigs = detect_key_level_signals(candles, state.key_levels) if candles else []
+            kl_idxs = {s.candle_index for s in kl_sigs}
+            sw_sigs = [s for s in (detect_signals(candles) if candles else [])
+                       if s.candle_index not in kl_idxs]
+            signals = kl_sigs + sw_sigs
             chart_container_ref.current.content = _build_chart(
                 candles, sma50, sma200, signals, chart_w, chart_h, n_visible,
+                key_levels=state.key_levels,
             )
             chart_container_ref.current.update()
 
@@ -911,7 +916,12 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
         sma50   = _compute_sma(candles, 50)
         sma200  = _compute_sma(candles, 200)
-        signals = detect_signals(candles)
+
+        # Key-level grabs take priority; swing signals fill in non-overlapping candles
+        kl_sigs = detect_key_level_signals(candles, state.key_levels)
+        kl_idxs = {s.candle_index for s in kl_sigs}
+        sw_sigs = [s for s in detect_signals(candles) if s.candle_index not in kl_idxs]
+        signals = kl_sigs + sw_sigs
 
         chart_w, chart_h, n_visible = _get_chart_dims()
 
@@ -919,6 +929,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         if chart_container_ref.current:
             chart_container_ref.current.content = _build_chart(
                 candles, sma50, sma200, signals, chart_w, chart_h, n_visible,
+                key_levels=state.key_levels,
             )
             chart_container_ref.current.update()
 
