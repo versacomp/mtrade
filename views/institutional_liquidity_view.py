@@ -330,6 +330,82 @@ def _parse_api_candles(raw: list[dict]) -> list[Candle]:
 
 
 # ── Algorithm ──────────────────────────────────────────────────────────────────
+def _compute_key_levels(all_candles: list) -> KeyLevels:
+    """
+    Compute 4H High/Low and Previous Day High/Low from candle history.
+
+    The extended (48h) filesystem cache is the data source.  On first run the
+    cache may not yet span a full day, in which case pd_high / pd_low are None.
+    """
+    if not all_candles:
+        return KeyLevels()
+
+    now       = time.time()
+    prev_date = datetime.fromtimestamp(now - 86400).date()
+    h4_cut    = now - 4 * 3600
+
+    h4_candles = [c for c in all_candles if c.timestamp >= h4_cut]
+    pd_candles = [c for c in all_candles
+                  if datetime.fromtimestamp(c.timestamp).date() == prev_date]
+
+    return KeyLevels(
+        h4_high = max((c.high for c in h4_candles), default=None),
+        h4_low  = min((c.low  for c in h4_candles), default=None),
+        pd_high = max((c.high for c in pd_candles), default=None),
+        pd_low  = min((c.low  for c in pd_candles), default=None),
+    )
+
+
+def detect_key_level_signals(candles: list, kl: KeyLevels) -> list:
+    """
+    Detect liquidity grabs at 4H and Previous Day High/Low levels.
+
+    BEAR grab: wick pierces above level, body closes back below it,
+               reversal ≥ 30 % of the wick above the level.
+    BULL grab: wick pierces below level, body closes back above it,
+               reversal ≥ 30 % of the wick below the level.
+    Only the last SIGNAL_LOOKBACK completed candles are scanned.
+    """
+    if len(candles) < 3:
+        return []
+
+    levels = []
+    if kl.h4_high is not None: levels.append(("BEAR", kl.h4_high, "4HH"))
+    if kl.h4_low  is not None: levels.append(("BULL", kl.h4_low,  "4HL"))
+    if kl.pd_high is not None: levels.append(("BEAR", kl.pd_high, "PDH"))
+    if kl.pd_low  is not None: levels.append(("BULL", kl.pd_low,  "PDL"))
+    if not levels:
+        return []
+
+    completed = candles[:-1]
+    signals: list = []
+    seen: set = set()
+
+    for ci in range(max(0, len(completed) - SIGNAL_LOOKBACK), len(completed)):
+        if ci in seen:
+            continue
+        c = completed[ci]
+        for direction, level, src in levels:
+            if direction == "BEAR":
+                wick_above = c.high - level
+                reversal   = level  - c.close
+                if wick_above > 0 and c.close < level and reversal >= wick_above * 0.30:
+                    signals.append(Signal(candle_index=ci, direction="BEAR",
+                                         level=level, source=src))
+                    seen.add(ci)
+                    break
+            else:
+                wick_below = level  - c.low
+                reversal   = c.close - level
+                if wick_below > 0 and c.close > level and reversal >= wick_below * 0.30:
+                    signals.append(Signal(candle_index=ci, direction="BULL",
+                                         level=level, source=src))
+                    seen.add(ci)
+                    break
+
+    return signals
+
+
 def _compute_sma(candles: list[Candle], period: int) -> list[Optional[float]]:
     closes = [c.close for c in candles]
     result: list[Optional[float]] = []
