@@ -3,18 +3,36 @@
 import flet as ft
 
 import api.connection_status as cs
-from config import (
-    TASTYTRADE_API_BASE,
-    TASTYTRADE_CLIENT_ID,
-    TASTYTRADE_CLIENT_SECRET,
-    TASTYTRADE_REFRESH_TOKEN,
-)
+import config
+
+
+# Colour constants for the environment indicator on this page
+_COL_SANDBOX    = "#E65100"   # deep orange — "test, be careful"
+_COL_PRODUCTION = "#1B5E20"   # dark green  — "live, be very careful"
 
 
 def build_login_view(on_success, on_error) -> ft.View:
     """Build the login view with OAuth and optional username/password."""
 
+    env_label_ref = ft.Ref[ft.Text]()
+    env_badge_ref = ft.Ref[ft.Container]()
+
     error_text = ft.Text("", color=ft.Colors.ERROR, visible=False)
+
+    def _env_color() -> str:
+        return _COL_SANDBOX if config.is_sandbox() else _COL_PRODUCTION
+
+    def _env_label() -> str:
+        return "SANDBOX" if config.is_sandbox() else "PRODUCTION"
+
+    def _on_env_toggle(e: ft.ControlEvent) -> None:
+        config.set_sandbox(e.control.value)
+        if env_label_ref.current:
+            env_label_ref.current.value = _env_label()
+            env_label_ref.current.update()
+        if env_badge_ref.current:
+            env_badge_ref.current.bgcolor = _env_color()
+            env_badge_ref.current.update()
 
     def show_error(msg: str) -> None:
         error_text.value = msg
@@ -26,20 +44,26 @@ def build_login_view(on_success, on_error) -> ft.View:
         on_error(msg)
 
     def use_oauth(e: ft.ControlEvent) -> None:
-        if not all([TASTYTRADE_CLIENT_ID, TASTYTRADE_CLIENT_SECRET, TASTYTRADE_REFRESH_TOKEN]):
-            report_error("Set TASTYTRADE_CLIENT_ID, TASTYTRADE_CLIENT_SECRET, and TASTYTRADE_REFRESH_TOKEN in .env")
+        client_id, client_secret, refresh_token = config.get_oauth_credentials()
+        if not all([client_id, client_secret, refresh_token]):
+            suffix = "_SANDBOX" if config.is_sandbox() else ""
+            report_error(
+                f"Set TASTYTRADE_CLIENT_ID{suffix}, TASTYTRADE_CLIENT_SECRET{suffix}, "
+                f"and TASTYTRADE_REFRESH_TOKEN{suffix} in .env"
+            )
             return
         try:
             from api.tastytrade_client import TastytradeClient
 
             client = TastytradeClient(
-                TASTYTRADE_API_BASE,
-                client_id=TASTYTRADE_CLIENT_ID,
-                client_secret=TASTYTRADE_CLIENT_SECRET,
-                refresh_token=TASTYTRADE_REFRESH_TOKEN,
+                config.get_api_base(),
+                client_id=client_id,
+                client_secret=client_secret,
+                refresh_token=refresh_token,
             )
             client._ensure_token()
-            cs.set_status(cs.ConnState.LIVE, "OAuth authenticated")
+            env = "sandbox" if config.is_sandbox() else "production"
+            cs.set_status(cs.ConnState.LIVE, f"OAuth authenticated ({env})")
             on_success(client)
         except Exception as ex:
             cs.set_status(cs.ConnState.OFFLINE, f"OAuth failed: {ex}")
@@ -47,16 +71,17 @@ def build_login_view(on_success, on_error) -> ft.View:
 
     def do_password_login(e: ft.ControlEvent) -> None:
         login_val = login_field.value
-        pwd_val = password_field.value
+        pwd_val   = password_field.value
         if not login_val or not pwd_val:
             report_error("Enter username and password")
             return
         try:
             from api.tastytrade_client import TastytradeClient
 
-            client = TastytradeClient(TASTYTRADE_API_BASE)
+            client = TastytradeClient(config.get_api_base())
             client.login(login_val, pwd_val)
-            cs.set_status(cs.ConnState.LIVE, "Authenticated")
+            env = "sandbox" if config.is_sandbox() else "production"
+            cs.set_status(cs.ConnState.LIVE, f"Authenticated ({env})")
             on_success(client)
         except Exception as ex:
             cs.set_status(cs.ConnState.OFFLINE, f"Login failed: {ex}")
