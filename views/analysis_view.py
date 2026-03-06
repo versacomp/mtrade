@@ -90,7 +90,7 @@ def _build_equity_canvas(equity: list[float], width: int, height: int = 160) -> 
         return ft.Container(
             width=width, height=height, bgcolor=_BG,
             content=ft.Text("No closed trades yet", color=COL_LABEL, size=12),
-            alignment=ft.alignment.center,
+            alignment=ft.Alignment(0, 0),
             border_radius=8,
             border=ft.border.all(1, _BORDER),
         )
@@ -629,7 +629,7 @@ def build_analysis_view(client, page: ft.Page) -> ft.View:
                             size=12, color=_DIM),
                 ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=8),
                 padding=ft.padding.symmetric(vertical=32),
-                alignment=ft.alignment.center,
+                alignment=ft.Alignment(0, 0),
             ),
 
             # ── Live trade KPIs ───────────────────────────────────────────────
