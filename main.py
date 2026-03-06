@@ -11,6 +11,7 @@ import logging
 import logging.handlers
 import flet as ft
 
+from views.analysis_view import build_analysis_view
 from views.chart_view import build_chart_view
 from views.dashboard_view import build_dashboard_view
 from views.institutional_liquidity_view import build_institutional_liquidity_view
@@ -111,6 +112,12 @@ def main(page: ft.Page) -> None:
         elif troute.match("/liquidity"):
             if client_ref:
                 page.views.append(build_institutional_liquidity_view(client_ref[0], page))
+            else:
+                asyncio.create_task(page.push_route("/"))
+                return
+        elif troute.match("/analysis"):
+            if client_ref:
+                page.views.append(build_analysis_view(client_ref[0], page))
             else:
                 asyncio.create_task(page.push_route("/"))
                 return

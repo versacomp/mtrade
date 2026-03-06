@@ -715,6 +715,296 @@ def detect_signals(candles: list[Candle]) -> list[Signal]:
     return signals
 
 
+# ── Full-buffer signal detection (for back-test) ───────────────────────────────
+def detect_all_signals(candles: list) -> list:
+    """
+    Slide the liquidity-grab detector across the ENTIRE candle buffer.
+
+    Unlike detect_signals(), which only scans the last SIGNAL_LOOKBACK candles,
+    this version scans every candle from index SWING_LOOKBACK*2 onward so that
+    back-test results cover the full history window.  No look-ahead: each candle
+    only sees swings that existed before it.
+    """
+    if len(candles) < SWING_LOOKBACK * 2 + 2:
+        return []
+
+    completed = candles[:-1]
+    n         = len(completed)
+    sh        = _swing_highs(completed, SWING_LOOKBACK)
+    sl_pts    = _swing_lows(completed,  SWING_LOOKBACK)
+    signals: list = []
+    seen: set     = set()
+
+    for ci in range(SWING_LOOKBACK * 2, n):
+        if ci in seen:
+            continue
+        c = completed[ci]
+
+        valid_sh = [(i, p) for i, p in sh    if i < ci and i > ci - SWING_WINDOW]
+        valid_sl = [(i, p) for i, p in sl_pts if i < ci and i > ci - SWING_WINDOW]
+
+        for _, level in valid_sh:
+            wick_above = c.high - level
+            reversal   = level  - c.close
+            if wick_above > 0 and c.close < level and reversal >= wick_above * 0.30:
+                signals.append(Signal(candle_index=ci, direction="BEAR", level=level))
+                seen.add(ci)
+                break
+        if ci in seen:
+            continue
+        for _, level in valid_sl:
+            wick_below = level   - c.low
+            reversal   = c.close - level
+            if wick_below > 0 and c.close > level and reversal >= wick_below * 0.30:
+                signals.append(Signal(candle_index=ci, direction="BULL", level=level))
+                seen.add(ci)
+                break
+
+    return signals
+
+
+# ── Strategy KPI computation ────────────────────────────────────────────────────
+def compute_kpis(trades: list) -> dict:
+    """
+    Compute all strategy performance KPIs from a list of SimTrade objects.
+    Safe to call with an empty list — all metrics return sensible defaults.
+    """
+    import statistics as _stat
+
+    closed = [t for t in trades if t.status in ("WIN", "LOSS")]
+    wins   = [t for t in closed if t.status == "WIN"]
+    losses = [t for t in closed if t.status == "LOSS"]
+    opens  = [t for t in trades if t.status == "OPEN"]
+
+    n_closed = len(closed)
+    n_wins   = len(wins)
+    n_losses = len(losses)
+
+    win_rate     = (n_wins / n_closed * 100) if n_closed else 0.0
+    gross_wins   = sum(t.pnl for t in wins)
+    gross_losses = abs(sum(t.pnl for t in losses))
+    total_pnl    = sum(t.pnl for t in closed)
+    avg_pnl      = total_pnl / n_closed if n_closed else 0.0
+    avg_win      = gross_wins / n_wins   if n_wins   else 0.0
+    avg_loss_raw = sum(t.pnl for t in losses) / n_losses if n_losses else 0.0  # negative
+    wl_ratio     = avg_win / abs(avg_loss_raw) if avg_loss_raw != 0 else float("inf")
+    profit_factor= gross_wins / gross_losses   if gross_losses > 0 else float("inf")
+    expectancy   = (win_rate / 100 * avg_win) + ((1 - win_rate / 100) * avg_loss_raw)
+    max_win      = max((t.pnl for t in wins),   default=0.0)
+    max_loss     = min((t.pnl for t in losses), default=0.0)
+
+    # Equity curve (chronological)
+    sorted_closed = sorted(closed, key=lambda t: t.closed_at or 0)
+    equity: list[float] = []
+    running = 0.0
+    for t in sorted_closed:
+        running += t.pnl
+        equity.append(running)
+
+    # Max drawdown
+    max_dd = 0.0
+    peak_eq = float("-inf")
+    for v in equity:
+        if v > peak_eq:
+            peak_eq = v
+        dd = peak_eq - v
+        if dd > max_dd:
+            max_dd = dd
+
+    # Sharpe (simplified — mean / std of per-trade P&L, no risk-free rate)
+    if n_closed > 1:
+        pnls   = [t.pnl for t in closed]
+        mean   = sum(pnls) / n_closed
+        std    = _stat.stdev(pnls)
+        sharpe = mean / std if std > 0 else 0.0
+    else:
+        sharpe = 0.0
+
+    recovery = total_pnl / max_dd if max_dd > 0 else float("inf")
+
+    # Ratchet stop exit breakdown
+    tp_closed    = sum(1 for t in closed
+                       if abs(t.pnl - round(t.risk * RR_RATIO, 4)) < 0.001)
+    trail_closed = sum(1 for t in closed
+                       if t.sl_stage == 2
+                       and abs(t.pnl - round(t.risk * RR_RATIO, 4)) >= 0.001)
+    be_closed    = sum(1 for t in closed if t.sl_stage >= 1 and abs(t.pnl) < 0.001)
+    orig_sl      = sum(1 for t in closed if t.sl_stage == 0 and t.status == "LOSS")
+    protected    = sum(1 for t in closed
+                       if t.sl_stage >= 1
+                       and abs(t.pnl - round(t.risk * RR_RATIO, 4)) >= 0.001)
+
+    # Source breakdown
+    from collections import defaultdict as _dd
+    src_stats: dict = _dd(lambda: {"wins": 0, "losses": 0, "pnl": 0.0})
+    for t in closed:
+        src = t.source.replace("+RE", "").strip()
+        if t.status == "WIN":
+            src_stats[src]["wins"] += 1
+        else:
+            src_stats[src]["losses"] += 1
+        src_stats[src]["pnl"] += t.pnl
+
+    return {
+        "total": len(trades), "closed": n_closed,
+        "wins": n_wins, "losses": n_losses, "opens": len(opens),
+        "win_rate": win_rate, "profit_factor": profit_factor,
+        "expectancy": expectancy, "total_pnl": total_pnl, "avg_pnl": avg_pnl,
+        "avg_win": avg_win, "avg_loss": avg_loss_raw,
+        "wl_ratio": wl_ratio, "max_win": max_win, "max_loss": max_loss,
+        "max_drawdown": max_dd, "sharpe": sharpe, "recovery": recovery,
+        "equity_curve": equity,
+        "tp_closed": tp_closed, "trail_closed": trail_closed,
+        "be_closed": be_closed, "orig_sl": orig_sl, "protected": protected,
+        "source_stats": dict(src_stats),
+    }
+
+
+# ── Back-test trade simulator ──────────────────────────────────────────────────
+def simulate_trades(signals: list, candles: list, trend_filter_on: bool = True) -> list:
+    """
+    Pure back-test engine.  Replays signals over candles using the same rules as
+    live trading (divergence gate, pro-trend filter, ratcheting stop) but with
+    no side effects — returns a new list of SimTrade objects.
+    """
+    import uuid as _uuid
+
+    sim: list = []
+
+    for sig in sorted(signals, key=lambda s: s.candle_index):
+        if not sig.divergence:
+            continue
+        if trend_filter_on and not sig.pro_trend:
+            continue
+        if sig.candle_index >= len(candles):
+            continue
+
+        open_trades = [t for t in sim if t.status == "OPEN"]
+        if len(open_trades) >= MAX_OPEN_TRADES:
+            existing = open_trades[0]
+            if existing.direction == sig.direction:
+                continue
+            # Opposing signal — close at market, no re-entry in back-test
+            mc = candles[sig.candle_index]
+            existing.pnl    = round(mc.close - existing.entry, 4) if existing.direction == "BULL" \
+                              else round(existing.entry - mc.close, 4)
+            existing.status    = "WIN" if existing.pnl >= 0 else "LOSS"
+            existing.closed_at = mc.timestamp
+            continue
+
+        c = candles[sig.candle_index]
+        if any(abs(t.opened_at - c.timestamp) < 1.0 for t in sim):
+            continue
+
+        entry = c.close
+        if sig.direction == "BULL":
+            sl   = round(c.low  - SL_BUFFER, 4)
+            risk = round(entry - sl, 4)
+            tp   = round(entry + risk * RR_RATIO, 4)
+        else:
+            sl   = round(c.high + SL_BUFFER, 4)
+            risk = round(sl - entry, 4)
+            tp   = round(entry - risk * RR_RATIO, 4)
+        if risk <= 0:
+            continue
+
+        sim.append(SimTrade(
+            id=_uuid.uuid4().hex, symbol="BT",
+            direction=sig.direction, source=sig.source,
+            entry=entry, sl=sl, tp=tp, risk=risk,
+            opened_at=c.timestamp, opened_idx=sig.candle_index,
+        ))
+
+    # Resolve all trades with ratcheting stop (O(n) per trade via running peak)
+    ts_to_idx = {c.timestamp: i for i, c in enumerate(candles)}
+    for trade in sim:
+        if trade.status != "OPEN":
+            continue
+        open_pos = ts_to_idx.get(trade.opened_at)
+        if open_pos is None:
+            continue
+
+        tp_dist = abs(trade.tp - trade.entry)
+        if tp_dist == 0:
+            continue
+
+        peak = candles[open_pos].high if trade.direction == "BULL" \
+               else candles[open_pos].low
+
+        for c in candles[open_pos + 1:]:
+            # Update running peak
+            if trade.direction == "BULL":
+                if c.high > peak:
+                    peak = c.high
+                progress = peak - trade.entry
+                if progress >= TRAIL_TRIGGER * tp_dist:
+                    trail_sl = round(peak - trade.risk * TRAIL_OFFSET, 4)
+                    new_sl   = max(trade.sl, trail_sl)
+                    if new_sl > trade.sl:
+                        trade.sl = new_sl; trade.sl_stage = 2; trade.peak_price = peak
+                elif progress >= BE_TRIGGER * tp_dist and trade.sl_stage < 1:
+                    trade.sl = trade.entry; trade.sl_stage = 1; trade.peak_price = peak
+                if c.low <= trade.sl:
+                    trade.status    = "WIN" if trade.sl > trade.entry else "LOSS"
+                    trade.pnl       = round(trade.sl - trade.entry, 4)
+                    trade.closed_at = c.timestamp
+                    break
+                if c.high >= trade.tp:
+                    trade.status    = "WIN"
+                    trade.pnl       = round(trade.risk * RR_RATIO, 4)
+                    trade.closed_at = c.timestamp
+                    break
+            else:
+                if c.low < peak:
+                    peak = c.low
+                progress = trade.entry - peak
+                if progress >= TRAIL_TRIGGER * tp_dist:
+                    trail_sl = round(peak + trade.risk * TRAIL_OFFSET, 4)
+                    new_sl   = min(trade.sl, trail_sl)
+                    if new_sl < trade.sl:
+                        trade.sl = new_sl; trade.sl_stage = 2; trade.peak_price = peak
+                elif progress >= BE_TRIGGER * tp_dist and trade.sl_stage < 1:
+                    trade.sl = trade.entry; trade.sl_stage = 1; trade.peak_price = peak
+                if c.high >= trade.sl:
+                    trade.status    = "WIN" if trade.sl < trade.entry else "LOSS"
+                    trade.pnl       = round(trade.entry - trade.sl, 4)
+                    trade.closed_at = c.timestamp
+                    break
+                if c.low <= trade.tp:
+                    trade.status    = "WIN"
+                    trade.pnl       = round(trade.risk * RR_RATIO, 4)
+                    trade.closed_at = c.timestamp
+                    break
+
+    return sim
+
+
+def prepare_backtest(sym: str) -> tuple:
+    """
+    Load the full candle cache for *sym*, run full-buffer signal detection with
+    divergence and pro-trend flags set, and return all inputs needed by simulate_trades.
+
+    Returns (candles, signals) — both are new lists, no shared state.
+    """
+    candles = _load_cache_full(sym)
+    if not candles:
+        return [], []
+
+    kl                        = _compute_key_levels(candles)
+    sma50, sma200, rsi, kl_sigs = _compute_heavy(candles, kl)
+
+    # Full-buffer swing signals (not limited to SIGNAL_LOOKBACK)
+    sw_all   = detect_all_signals(candles)
+    kl_idxs  = {s.candle_index for s in kl_sigs}
+    sw_extra = [s for s in sw_all if s.candle_index not in kl_idxs]
+    for s in sw_extra:
+        s.divergence = _check_rsi_divergence(s, candles, rsi)
+        s.pro_trend  = _check_pro_trend(s, candles, sma200)
+
+    all_sigs = sorted(kl_sigs + sw_extra, key=lambda s: s.candle_index)
+    return candles, all_sigs
+
+
 # ── Volume profile ─────────────────────────────────────────────────────────────
 def _build_volume_profile(
     visible: list,

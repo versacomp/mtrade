@@ -54,6 +54,10 @@ def nav_app_bar(
                 "Liquidity",
                 on_click=lambda _: asyncio.create_task(page.push_route("/liquidity")),
             ),
+            ft.TextButton(
+                "Analysis",
+                on_click=lambda _: asyncio.create_task(page.push_route("/analysis")),
+            ),
             ft.Container(width=12),
             # ── Status dot ────────────────────────────────────────────────────
             ft.Container(
