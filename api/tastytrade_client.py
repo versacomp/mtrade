@@ -101,6 +101,22 @@ class TastytradeClient:
             log.error("GET ✗ network error | %s | %s", url, exc)
             raise
 
+    def _delete(self, path: str) -> dict[str, Any]:
+        url = f"{self.base_url}{path}"
+        log.debug("DELETE → %s", url)
+        try:
+            r = requests.delete(url, headers=self._headers(), timeout=30)
+            log.debug("DELETE ← %s %s | %s", r.status_code, r.reason, url)
+            r.raise_for_status()
+            return r.json() if r.content else {}
+        except requests.HTTPError as exc:
+            body = exc.response.text[:500] if exc.response is not None else ""
+            log.error("DELETE ✗ %s | %s | %s", exc.response.status_code, url, body)
+            raise
+        except requests.RequestException as exc:
+            log.error("DELETE ✗ network error | %s | %s", url, exc)
+            raise
+
     def _post(self, path: str, json: dict | None = None) -> dict[str, Any]:
         url = f"{self.base_url}{path}"
         log.debug("POST → %s | body=%s", url, json)
