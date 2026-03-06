@@ -287,6 +287,10 @@ _ui_refresh_hook: list[Optional[Callable]] = [None]
 # Global sim on/off toggle — False by default so trades only open when explicitly enabled
 _sim_enabled: bool = False
 
+# Global live trading toggle — False by default; when True real orders are placed
+_live_enabled:  bool      = False
+_live_account:  list[str] = [""]   # cached account number, fetched on first live enable
+
 
 # ── Filesystem candle cache ─────────────────────────────────────────────────────
 _CACHE_DIR = Path.home() / ".mtrade" / "cache" / "candles"
