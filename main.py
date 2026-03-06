@@ -1,7 +1,9 @@
 """
 MTrade - Trading tool connecting to tastytrade API.
 
-Uses tastytrade REST API at api.cert.tastyworks.com (sandbox).
+Supports both the production API (api.tastyworks.com) and the sandbox/certification
+environment (api.cert.tastyworks.com). The active environment is selected at login.
+
 OAuth: https://developer.tastytrade.com/oauth/
 API Overview: https://developer.tastytrade.com/api-overview/
 """

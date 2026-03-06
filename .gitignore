@@ -1,14 +1,33 @@
+# IDE
 .idea
+.vscode
+
+# Virtual environment
 .venv
+venv
+env
+
+# Python
 __pycache__
 *.pyc
-.env
+*.pyo
+*.pyd
 *.egg-info
 .pytest_cache
+
+# Secrets — never commit
+.env
+
+# Build / distribution
+build/
+dist/
+*.spec
+
+# Logs
 *.log
 
-# Cache storage
+# Runtime cache (candles, sim trades, preferences)
 .mtrade
 
-# Claude
+# Claude Code
 .claude

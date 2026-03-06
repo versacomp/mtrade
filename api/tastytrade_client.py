@@ -1,8 +1,11 @@
 """
 tastytrade REST API client.
 
-Consumes REST services at api.cert.tastyworks.com (sandbox) per:
-https://developer.tastytrade.com/api-overview/
+Connects to either the production API (api.tastyworks.com) or the sandbox
+environment (api.cert.tastyworks.com). The base URL is supplied by the caller
+and resolved from environment variables via config.get_api_base().
+
+API reference: https://developer.tastytrade.com/api-overview/
 """
 
 import logging
