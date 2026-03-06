@@ -193,6 +193,7 @@ class Signal:
     level:        float        # grabbed price level
     source:       str  = "SWING"  # "SWING" | "4HH" | "4HL" | "PDH" | "PDL"
     divergence:   bool = False    # True when RSI divergence confirms the signal
+    pro_trend:    bool = False    # True when signal is aligned with the SMA200 macro trend
 
 
 @dataclass
@@ -600,6 +601,20 @@ def _check_rsi_divergence(sig: "Signal", candles: list, rsi: list) -> bool:
     return False
 
 
+def _check_pro_trend(sig: "Signal", candles: list, sma200: list) -> bool:
+    """
+    Returns True when the signal direction is aligned with the SMA200 macro trend.
+
+    BULL signals: close > SMA200  (price above the 200 MA → uptrend)
+    BEAR signals: close < SMA200  (price below the 200 MA → downtrend)
+    """
+    ci = sig.candle_index
+    if ci >= len(candles) or ci >= len(sma200) or sma200[ci] is None:
+        return False
+    close = candles[ci].close
+    return (close > sma200[ci]) if sig.direction == "BULL" else (close < sma200[ci])
+
+
 def _compute_heavy(candles: list, key_levels: "KeyLevels") -> tuple:
     """SMA + RSI + signal detection — safe to call from a thread executor."""
     sma50   = _compute_sma(candles, 50)
@@ -611,6 +626,7 @@ def _compute_heavy(candles: list, key_levels: "KeyLevels") -> tuple:
     all_sigs = kl_sigs + sw_sigs
     for sig in all_sigs:
         sig.divergence = _check_rsi_divergence(sig, candles, rsi)
+        sig.pro_trend  = _check_pro_trend(sig, candles, sma200)
     return sma50, sma200, rsi, all_sigs
 
 
@@ -811,12 +827,24 @@ def _build_chart(
     def cx(i: int) -> float:
         return PAD_LEFT + i * candle_step + candle_step / 2
 
+    # Determine macro trend from last visible close vs last visible SMA200
+    _last_sma200 = next((v for v in reversed(vis_sma200) if v is not None), None)
+    _last_close  = visible[-1].close if visible else None
+    if _last_close is not None and _last_sma200 is not None:
+        _trend_bull = _last_close > _last_sma200
+        bg_col      = "#0D1510" if _trend_bull else "#150D0D"
+        sma200_col  = "#44DD88" if _trend_bull else "#FF5555"
+    else:
+        _trend_bull = None
+        bg_col      = COL_BG
+        sma200_col  = COL_SMA200
+
     shapes: list[cv.Shape] = []
 
-    # Background
+    # Background (tinted green/red based on SMA200 trend)
     shapes.append(cv.Rect(
         x=0, y=0, width=chart_w, height=chart_h,
-        paint=ft.Paint(color=COL_BG, style=ft.PaintingStyle.FILL),
+        paint=ft.Paint(color=bg_col, style=ft.PaintingStyle.FILL),
     ))
 
     # Volume profile (left-anchored, drawn under grid/labels)
@@ -872,7 +900,7 @@ def _build_chart(
                 spans=[ft.TextSpan(kl_label, style=ft.TextStyle(size=8, color=kl_color))],
             ))
 
-    # SMA 200 (blue)
+    # SMA 200 (green when above, red when below — reflects macro trend)
     prev200: Optional[tuple[float, float]] = None
     for i, v in enumerate(vis_sma200):
         if v is not None:
@@ -880,7 +908,7 @@ def _build_chart(
             if prev200 is not None:
                 shapes.append(cv.Line(
                     x1=prev200[0], y1=prev200[1], x2=pt[0], y2=pt[1],
-                    paint=ft.Paint(color=COL_SMA200, stroke_width=1.5),
+                    paint=ft.Paint(color=sma200_col, stroke_width=1.5),
                 ))
             prev200 = pt
 
@@ -914,20 +942,35 @@ def _build_chart(
             paint=ft.Paint(color=color, style=ft.PaintingStyle.FILL),
         ))
 
-    # Signal arrows
-    # Divergence-confirmed signals get full-bright arrows;
-    # unconfirmed signals get smaller, muted arrows (still shown for context).
+    # Signal arrows — 3-tier quality system:
+    #   Tier 1 (Prime):    divergence=True  AND pro_trend=True  → bright, large, filled
+    #   Tier 2 (Filtered): divergence=True  AND pro_trend=False → bright, medium, hollow (stroke)
+    #   Tier 3 (Weak):     divergence=False                     → dim, small, filled
     for sig in signals:
         vi = sig.candle_index - buf_offset
         if not 0 <= vi < len(visible):
             continue
         c = visible[vi]
         x = cx(vi)
-        confirmed = sig.divergence
-        hw = 7 if confirmed else 5    # half-width of arrow head
-        ht = 11 if confirmed else 8   # height of arrow head
+
+        if sig.divergence and sig.pro_trend:
+            # Tier 1: prime signal — bright, large filled arrow
+            hw, ht = 7, 11
+            style  = ft.PaintingStyle.FILL
+            col    = COL_SIG_BULL if sig.direction == "BULL" else COL_SIG_BEAR
+        elif sig.divergence:
+            # Tier 2: filtered (counter-trend) — bright but hollow, slightly smaller
+            hw, ht = 6, 9
+            style  = ft.PaintingStyle.STROKE
+            col    = COL_SIG_BULL if sig.direction == "BULL" else COL_SIG_BEAR
+        else:
+            # Tier 3: weak (no divergence) — dim small filled arrow
+            hw, ht = 5, 8
+            style  = ft.PaintingStyle.FILL
+            col    = "#007A3D" if sig.direction == "BULL" else "#882222"
+
+        stroke_w = 1.5 if style == ft.PaintingStyle.STROKE else 1.0
         if sig.direction == "BULL":
-            col   = COL_SIG_BULL if confirmed else "#007A3D"
             tip_y = py(c.low) + 14
             shapes.append(cv.Path(
                 elements=[
@@ -936,10 +979,9 @@ def _build_chart(
                     cv.Path.LineTo(x + hw, tip_y),
                     cv.Path.Close(),
                 ],
-                paint=ft.Paint(color=col, style=ft.PaintingStyle.FILL),
+                paint=ft.Paint(color=col, style=style, stroke_width=stroke_w),
             ))
         else:
-            col   = COL_SIG_BEAR if confirmed else "#882222"
             tip_y = py(c.high) - 3
             shapes.append(cv.Path(
                 elements=[
@@ -948,7 +990,7 @@ def _build_chart(
                     cv.Path.LineTo(x + hw, tip_y),
                     cv.Path.Close(),
                 ],
-                paint=ft.Paint(color=col, style=ft.PaintingStyle.FILL),
+                paint=ft.Paint(color=col, style=style, stroke_width=stroke_w),
             ))
 
     # ── Simulated trade levels: entry / SL / TP horizontal dashed lines ───────
@@ -1084,9 +1126,9 @@ def _build_chart(
         cv.Text(x=lx + 14,  y=ly - 2,
                 spans=[ft.TextSpan("SMA 50",  style=ft.TextStyle(size=9, color=COL_SMA50))]),
         cv.Line(x1=lx + 62, y1=ly + 4, x2=lx + 74, y2=ly + 4,
-                paint=ft.Paint(color=COL_SMA200, stroke_width=2)),
+                paint=ft.Paint(color=sma200_col, stroke_width=2)),
         cv.Text(x=lx + 76,  y=ly - 2,
-                spans=[ft.TextSpan("SMA 200", style=ft.TextStyle(size=9, color=COL_SMA200))]),
+                spans=[ft.TextSpan("SMA 200", style=ft.TextStyle(size=9, color=sma200_col))]),
     ]
     # In-chart legend (row 2: key levels)
     ly2 = ly + 14
@@ -1113,6 +1155,17 @@ def _build_chart(
             cv.Text(x=lx + 74,  y=ly3 - 2,
                     spans=[ft.TextSpan("Divergence", style=ft.TextStyle(size=9, color="#FFD700"))]),
         ]
+    # In-chart legend (row 4: macro trend from SMA200)
+    if _trend_bull is not None:
+        ly4 = ly + 42
+        trend_lbl = "↑ Uptrend" if _trend_bull else "↓ Downtrend"
+        shapes += [
+            cv.Line(x1=lx,     y1=ly4 + 4, x2=lx + 12, y2=ly4 + 4,
+                    paint=ft.Paint(color=sma200_col, stroke_width=1.5)),
+            cv.Text(x=lx + 14, y=ly4 - 2,
+                    spans=[ft.TextSpan(f"Trend: {trend_lbl}",
+                                       style=ft.TextStyle(size=9, color=sma200_col))]),
+        ]
 
     return cv.Canvas(shapes=shapes, width=chart_w, height=chart_h)
 
@@ -1134,10 +1187,11 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
     # ── Stream task reference (cancel to stop/switch) ─────────────────────────
     stream_task: list = [None]  # list[asyncio.Task | None]
 
-    # ── Alert / sound state ───────────────────────────────────────────────────
-    alert_enabled: list[bool] = [True]
-    sound_enabled: list[bool] = [True]
-    alert_task:    list        = [None]  # list[asyncio.Task | None]
+    # ── Alert / sound / filter state ──────────────────────────────────────────
+    alert_enabled:        list[bool] = [True]
+    sound_enabled:        list[bool] = [True]
+    trend_filter_enabled: list[bool] = [True]   # False → allow counter-trend trades
+    alert_task:           list        = [None]  # list[asyncio.Task | None]
 
     # ── Pan / zoom state ──────────────────────────────────────────────────────
     view_offset: list[int]   = [0]            # candles offset from right edge (0 = live)
@@ -1387,6 +1441,13 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             source=sig.source + "+RE",   # label distinguishes re-entries in chart/stats
             divergence=True,             # inherited from the original RSI-confirmed signal
         )
+
+        # Re-check trend alignment at re-entry time when the filter is active
+        if trend_filter_enabled[0]:
+            sma200_re = _compute_sma(candles, 200)
+            if not _check_pro_trend(re_sig, candles, sma200_re):
+                return   # trend flipped during the cooldown window — skip
+
         _execute_trade(re_sig, candles)
         _update_stats()
         asyncio.create_task(_update_ui())
@@ -1412,6 +1473,10 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
         # 2. Re-entry cooldown gate
         if state.re_entry_pending:
+            return
+
+        # 2.5. Pro-trend filter — skip counter-trend signals when filter is on
+        if trend_filter_enabled[0] and not sig.pro_trend:
             return
 
         if sig.candle_index >= len(candles):
@@ -2045,6 +2110,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
     signals_init = detect_signals(candles_init)
     for _s in signals_init:
         _s.divergence = _check_rsi_divergence(_s, candles_init, rsi_init)
+        _s.pro_trend  = _check_pro_trend(_s, candles_init, sma200_init)
 
     # ── Initial display values ────────────────────────────────────────────────
     last_price_str = f"${candles_init[-1].close:,.2f}" if candles_init else "Connecting…"
@@ -2164,17 +2230,26 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             ft.Container(width=10, height=3, bgcolor=COL_RSI, border_radius=2),
             ft.Text(f"RSI {RSI_PERIOD}", size=12, color=COL_RSI),
             ft.Container(width=8),
+            # Tier 1: prime (divergence + trend)
             ft.Text("▲", size=14, color=COL_SIG_BULL, weight=ft.FontWeight.BOLD),
-            ft.Text("Bull +div", size=12, color=COL_SIG_BULL),
-            ft.Container(width=6),
-            ft.Text("▲", size=12, color="#007A3D", weight=ft.FontWeight.BOLD),
-            ft.Text("Bull", size=12, color="#007A3D"),
+            ft.Text("Prime", size=11, color=COL_SIG_BULL),
+            ft.Container(width=4),
+            # Tier 2: filtered (divergence, counter-trend) — hollow arrow hint
+            ft.Text("▲", size=12, color=COL_SIG_BULL, weight=ft.FontWeight.BOLD),
+            ft.Text("Filter", size=11, color="#666666"),
+            ft.Container(width=4),
+            # Tier 3: weak (no divergence)
+            ft.Text("▲", size=11, color="#007A3D", weight=ft.FontWeight.BOLD),
+            ft.Text("Weak", size=11, color="#007A3D"),
             ft.Container(width=8),
             ft.Text("▼", size=14, color=COL_SIG_BEAR, weight=ft.FontWeight.BOLD),
-            ft.Text("Bear +div", size=12, color=COL_SIG_BEAR),
-            ft.Container(width=6),
-            ft.Text("▼", size=12, color="#882222", weight=ft.FontWeight.BOLD),
-            ft.Text("Bear", size=12, color="#882222"),
+            ft.Text("Prime", size=11, color=COL_SIG_BEAR),
+            ft.Container(width=4),
+            ft.Text("▼", size=12, color=COL_SIG_BEAR, weight=ft.FontWeight.BOLD),
+            ft.Text("Filter", size=11, color="#666666"),
+            ft.Container(width=4),
+            ft.Text("▼", size=11, color="#882222", weight=ft.FontWeight.BOLD),
+            ft.Text("Weak", size=11, color="#882222"),
             ft.Container(expand=True),
             ft.Checkbox(
                 label="Alert",
@@ -2192,6 +2267,15 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
                 check_color="white",
                 label_style=ft.TextStyle(size=12, color=COL_LABEL),
                 on_change=lambda e: sound_enabled.__setitem__(0, e.control.value),
+            ),
+            ft.Container(width=4),
+            ft.Checkbox(
+                label="Trend Filter",
+                value=True,
+                active_color=COL_CHIP_ACT,
+                check_color="white",
+                label_style=ft.TextStyle(size=12, color=COL_LABEL),
+                on_change=lambda e: trend_filter_enabled.__setitem__(0, e.control.value),
             ),
         ],
         spacing=4,
