@@ -182,6 +182,16 @@ COL_RSI    = "#9C27B0"   # RSI line (purple)
 COL_RSI_OB = "#FF5555"   # overbought level (≥70)
 COL_RSI_OS = "#44DD88"   # oversold level (≤30)
 
+# ADX / Range Rotation
+ADX_PERIOD    = 14
+ADX_THRESHOLD = 25       # below → ranging; above → trending
+RANGE_PERIOD  = 20       # rolling window for range band (swing high/low lookback)
+RANGE_PROX    = 0.25     # grabbed level must be within this fraction of range width from band
+
+COL_ADX        = "#00BCD4"   # ADX line (cyan)
+COL_ADX_THRESH = "#1A5050"   # ADX threshold line at 25
+COL_RANGE      = "#1A4040"   # range band curve colour
+
 
 # ── Data classes ───────────────────────────────────────────────────────────────
 @dataclass
@@ -201,6 +211,7 @@ class Signal:
     source:       str  = "SWING"  # "SWING" | "4HH" | "4HL" | "PDH" | "PDL"
     divergence:   bool = False    # True when RSI divergence confirms the signal
     pro_trend:    bool = False    # True when signal is aligned with the SMA200 macro trend
+    in_range:     bool = False    # True when ADX < threshold and level is at range boundary
 
 
 @dataclass
@@ -249,10 +260,13 @@ class SymbolState:
     sim_trades:       list = field(default_factory=list)  # list[SimTrade]
     re_entry_pending: bool = False   # True while waiting for the RE_ENTRY_DELAY cooldown
     # Cached render inputs — reused by lightweight pan/zoom redraws
-    cached_sma50:   list = field(default_factory=list)
-    cached_sma200:  list = field(default_factory=list)
-    cached_signals: list = field(default_factory=list)
-    cached_rsi:     list = field(default_factory=list)
+    cached_sma50:        list = field(default_factory=list)
+    cached_sma200:       list = field(default_factory=list)
+    cached_signals:      list = field(default_factory=list)
+    cached_rsi:          list = field(default_factory=list)
+    cached_adx:          list = field(default_factory=list)
+    cached_range_upper:  list = field(default_factory=list)
+    cached_range_lower:  list = field(default_factory=list)
 
 
 # Module-level symbol cache – persists across symbol switches within a session
@@ -627,11 +641,141 @@ def _check_pro_trend(sig: "Signal", candles: list, sma200: list) -> bool:
     return (close > sma200[ci]) if sig.direction == "BULL" else (close < sma200[ci])
 
 
+def _compute_adx(candles: list, period: int = ADX_PERIOD) -> list:
+    """
+    Wilder-smoothed ADX(14).
+
+    ADX < ADX_THRESHOLD → ranging market (mean-reversion favoured).
+    ADX ≥ ADX_THRESHOLD → trending market (momentum favoured).
+    Returns list[Optional[float]] aligned to the candle list.
+    """
+    n = len(candles)
+    result: list = [None] * n
+    if n < period * 2:
+        return result
+
+    # True Range and raw Directional Movement per candle
+    tr_vals, pdm_vals, mdm_vals = [], [], []
+    for i in range(1, n):
+        h, l   = candles[i].high, candles[i].low
+        h_prev = candles[i - 1].high
+        l_prev = candles[i - 1].low
+        c_prev = candles[i - 1].close
+        tr       = max(h - l, abs(h - c_prev), abs(l - c_prev))
+        up_move  = h - h_prev
+        dn_move  = l_prev - l
+        pdm = up_move if (up_move > dn_move and up_move > 0) else 0.0
+        mdm = dn_move if (dn_move > up_move and dn_move > 0) else 0.0
+        tr_vals.append(tr)
+        pdm_vals.append(pdm)
+        mdm_vals.append(mdm)
+
+    m = len(tr_vals)   # = n - 1
+    if m < period:
+        return result
+
+    def _dx(apdm_v: float, amdm_v: float, atr_v: float) -> float:
+        if atr_v == 0:
+            return 0.0
+        pdi = apdm_v / atr_v * 100
+        mdi = amdm_v / atr_v * 100
+        return abs(pdi - mdi) / (pdi + mdi) * 100 if (pdi + mdi) > 0 else 0.0
+
+    # Wilder seed — first period values correspond to candle[period]
+    atr  = sum(tr_vals[:period])
+    apdm = sum(pdm_vals[:period])
+    amdm = sum(mdm_vals[:period])
+    dx_vals = [_dx(apdm, amdm, atr)]   # dx_vals[k] → candle[period + k]
+
+    for k in range(period, m):
+        atr  = atr  - atr  / period + tr_vals[k]
+        apdm = apdm - apdm / period + pdm_vals[k]
+        amdm = amdm - amdm / period + mdm_vals[k]
+        dx_vals.append(_dx(apdm, amdm, atr))
+
+    if len(dx_vals) < period:
+        return result
+
+    # Smooth DX into ADX
+    adx_val = sum(dx_vals[:period]) / period
+    ci = period + period - 1          # first valid ADX index in candles
+    if ci < n:
+        result[ci] = adx_val
+    for j in range(period, len(dx_vals)):
+        adx_val = (adx_val * (period - 1) + dx_vals[j]) / period
+        ci = period + j
+        if ci < n:
+            result[ci] = adx_val
+
+    return result
+
+
+def _compute_range_bands(candles: list, period: int = RANGE_PERIOD) -> tuple:
+    """
+    Rolling N-period high (resistance) and low (support) curves.
+
+    Returns (upper, lower) — both list[Optional[float]] aligned to candles.
+    Useful for identifying the current trading range for mean-reversion entries.
+    """
+    n     = len(candles)
+    upper = [None] * n
+    lower = [None] * n
+    for i in range(period - 1, n):
+        window  = candles[i - period + 1 : i + 1]
+        upper[i] = max(c.high for c in window)
+        lower[i] = min(c.low  for c in window)
+    return upper, lower
+
+
+def _check_range_rotation(
+    sig: "Signal",
+    candles: list,
+    adx: list,
+    range_upper: list,
+    range_lower: list,
+) -> bool:
+    """
+    Returns True when all three conditions hold:
+      1. ADX < ADX_THRESHOLD  — market is ranging, not trending.
+      2. The grabbed price level is within RANGE_PROX of the relevant range boundary.
+         BULL grab: level near the rolling low (support).
+         BEAR grab: level near the rolling high (resistance).
+      3. Range width is non-zero (instrument is actually moving).
+
+    Together this confirms a mean-reversion setup at a range boundary, as described
+    in the Range Rotation concept — sell near the top, buy near the bottom.
+    """
+    ci = sig.candle_index
+    if ci >= len(candles) or ci >= len(adx):
+        return False
+    adx_val = adx[ci]
+    if adx_val is None or adx_val >= ADX_THRESHOLD:
+        return False   # trending — range rotation does not apply
+
+    if ci >= len(range_upper) or ci >= len(range_lower):
+        return False
+    upper = range_upper[ci]
+    lower = range_lower[ci]
+    if upper is None or lower is None:
+        return False
+    rng = upper - lower
+    if rng <= 0:
+        return False
+
+    proximity = RANGE_PROX * rng
+    if sig.direction == "BULL":
+        return sig.level <= lower + proximity   # grabbed level near support
+    else:
+        return sig.level >= upper - proximity   # grabbed level near resistance
+
+
 def _compute_heavy(candles: list, key_levels: "KeyLevels") -> tuple:
-    """SMA + RSI + signal detection — safe to call from a thread executor."""
-    sma50   = _compute_sma(candles, 50)
-    sma200  = _compute_sma(candles, 200)
-    rsi     = _compute_rsi(candles)
+    """SMA + RSI + ADX + range bands + signal detection — safe to call from a thread executor."""
+    sma50                = _compute_sma(candles, 50)
+    sma200               = _compute_sma(candles, 200)
+    rsi                  = _compute_rsi(candles)
+    adx                  = _compute_adx(candles)
+    range_upper, range_lower = _compute_range_bands(candles)
     kl_sigs = detect_key_level_signals(candles, key_levels)
     kl_idxs = {s.candle_index for s in kl_sigs}
     sw_sigs = [s for s in detect_signals(candles) if s.candle_index not in kl_idxs]
@@ -639,7 +783,8 @@ def _compute_heavy(candles: list, key_levels: "KeyLevels") -> tuple:
     for sig in all_sigs:
         sig.divergence = _check_rsi_divergence(sig, candles, rsi)
         sig.pro_trend  = _check_pro_trend(sig, candles, sma200)
-    return sma50, sma200, rsi, all_sigs
+        sig.in_range   = _check_range_rotation(sig, candles, adx, range_upper, range_lower)
+    return sma50, sma200, rsi, adx, range_upper, range_lower, all_sigs
 
 
 def _swing_highs(candles: list[Candle], lookback: int = SWING_LOOKBACK) -> list[tuple[int, float]]:
@@ -861,11 +1006,16 @@ def compute_kpis(trades: list) -> dict:
 
 
 # ── Back-test trade simulator ──────────────────────────────────────────────────
-def simulate_trades(signals: list, candles: list, trend_filter_on: bool = True) -> list:
+def simulate_trades(
+    signals: list,
+    candles: list,
+    trend_filter_on: bool = True,
+    range_filter_on: bool = True,
+) -> list:
     """
     Pure back-test engine.  Replays signals over candles using the same rules as
-    live trading (divergence gate, pro-trend filter, ratcheting stop) but with
-    no side effects — returns a new list of SimTrade objects.
+    live trading (divergence gate, pro-trend filter, range filter, ratcheting stop)
+    but with no side effects — returns a new list of SimTrade objects.
     """
     import uuid as _uuid
 
@@ -875,6 +1025,8 @@ def simulate_trades(signals: list, candles: list, trend_filter_on: bool = True) 
         if not sig.divergence:
             continue
         if trend_filter_on and not sig.pro_trend:
+            continue
+        if range_filter_on and not sig.in_range:
             continue
         if sig.candle_index >= len(candles):
             continue
@@ -990,8 +1142,8 @@ def prepare_backtest(sym: str) -> tuple:
     if not candles:
         return [], []
 
-    kl                        = _compute_key_levels(candles)
-    sma50, sma200, rsi, kl_sigs = _compute_heavy(candles, kl)
+    kl = _compute_key_levels(candles)
+    sma50, sma200, rsi, adx, range_upper, range_lower, kl_sigs = _compute_heavy(candles, kl)
 
     # Full-buffer swing signals (not limited to SIGNAL_LOOKBACK)
     sw_all   = detect_all_signals(candles)
@@ -1000,6 +1152,7 @@ def prepare_backtest(sym: str) -> tuple:
     for s in sw_extra:
         s.divergence = _check_rsi_divergence(s, candles, rsi)
         s.pro_trend  = _check_pro_trend(s, candles, sma200)
+        s.in_range   = _check_range_rotation(s, candles, adx, range_upper, range_lower)
 
     all_sigs = sorted(kl_sigs + sw_extra, key=lambda s: s.candle_index)
     return candles, all_sigs
@@ -1074,8 +1227,11 @@ def _build_chart(
     buf_start:   Optional[int]        = None,
     sim_trades:  Optional[list]       = None,
     rsi:         Optional[list]       = None,
+    adx:         Optional[list]       = None,
+    range_upper: Optional[list]       = None,
+    range_lower: Optional[list]       = None,
 ) -> ft.Control:
-    """Render the dark candlestick canvas with SMA lines, signal arrows, and RSI panel."""
+    """Render the dark candlestick canvas with SMA lines, signal arrows, RSI and ADX panels."""
 
     if not candles:
         return ft.Container(
@@ -1091,10 +1247,13 @@ def _build_chart(
     ))
     end        = min(total, start + n_visible)
     visible    = candles[start:end]
-    vis_sma50  = (sma50  or [])[start:end]
-    vis_sma200 = (sma200 or [])[start:end]
-    vis_rsi    = (rsi    or [])[start:end]
-    buf_offset = start
+    vis_sma50       = (sma50       or [])[start:end]
+    vis_sma200      = (sma200      or [])[start:end]
+    vis_rsi         = (rsi         or [])[start:end]
+    vis_adx         = (adx         or [])[start:end]
+    vis_range_upper = (range_upper or [])[start:end]
+    vis_range_lower = (range_lower or [])[start:end]
+    buf_offset      = start
 
     all_prices: list[float] = []
     for c in visible:
@@ -1110,9 +1269,10 @@ def _build_chart(
     pad         = (mx - mn) * 0.08 / price_scale or 2.0
     mn -= pad;  mx += pad
     price_range = mx - mn
-    # Reserve space at the bottom for the RSI sub-panel when RSI data is present
+    # Reserve space at the bottom for the RSI/ADX sub-panel when data is present
     rsi_visible = rsi is not None
-    rsi_reserve = (RSI_PANEL_H + RSI_GAP) if rsi_visible else 0
+    adx_visible = adx is not None and any(v is not None for v in (adx or []))
+    rsi_reserve = (RSI_PANEL_H + RSI_GAP) if (rsi_visible or adx_visible) else 0
     plot_h      = chart_h - PAD_TOP - PAD_BOTTOM - rsi_reserve
 
     # RSI panel y-coordinates (valid only when rsi_visible)
@@ -1225,6 +1385,33 @@ def _build_chart(
                     paint=ft.Paint(color=COL_SMA50, stroke_width=1.5),
                 ))
             prev50 = pt
+
+    # Range bands — rolling 20-period high/low (semi-transparent teal curves)
+    prev_ru: Optional[tuple[float, float]] = None
+    prev_rl: Optional[tuple[float, float]] = None
+    for i in range(len(vis_range_upper)):
+        ru = vis_range_upper[i] if i < len(vis_range_upper) else None
+        rl = vis_range_lower[i] if i < len(vis_range_lower) else None
+        if ru is not None and mn <= ru <= mx:
+            pt = (cx(i), py(ru))
+            if prev_ru is not None:
+                shapes.append(cv.Line(
+                    x1=prev_ru[0], y1=prev_ru[1], x2=pt[0], y2=pt[1],
+                    paint=ft.Paint(color=COL_RANGE, stroke_width=1.0),
+                ))
+            prev_ru = pt
+        else:
+            prev_ru = None
+        if rl is not None and mn <= rl <= mx:
+            pt = (cx(i), py(rl))
+            if prev_rl is not None:
+                shapes.append(cv.Line(
+                    x1=prev_rl[0], y1=prev_rl[1], x2=pt[0], y2=pt[1],
+                    paint=ft.Paint(color=COL_RANGE, stroke_width=1.0),
+                ))
+            prev_rl = pt
+        else:
+            prev_rl = None
 
     # Candles
     body_w = max(1, int(candle_step * 0.55))
@@ -1359,8 +1546,8 @@ def _build_chart(
                         )],
                     ))
 
-    # ── RSI sub-panel ────────────────────────────────────────────────────────────
-    if rsi_visible:
+    # ── RSI / ADX sub-panel ───────────────────────────────────────────────────────
+    if rsi_visible or adx_visible:
         # Panel background
         shapes.append(cv.Rect(
             x=PAD_LEFT, y=rsi_top, width=float(chart_w - PAD_LEFT - PAD_RIGHT), height=RSI_PANEL_H,
@@ -1387,47 +1574,87 @@ def _build_chart(
                 spans=[ft.TextSpan(ref_lbl, style=ft.TextStyle(size=8, color=ref_col))],
             ))
 
-        # RSI line segments (colored by level)
-        def _rsi_seg_color(v: float) -> str:
-            if v >= 70:
-                return COL_RSI_OB
-            if v <= 30:
-                return COL_RSI_OS
-            return COL_RSI
+        if rsi_visible:
+            # RSI line segments (colored by level)
+            def _rsi_seg_color(v: float) -> str:
+                if v >= 70:
+                    return COL_RSI_OB
+                if v <= 30:
+                    return COL_RSI_OS
+                return COL_RSI
 
-        prev_rsi: Optional[tuple[float, float]] = None
-        for vi, rsi_v in enumerate(vis_rsi):
-            if rsi_v is None:
-                prev_rsi = None
-                continue
-            pt = (cx(vi), ry(rsi_v))
-            if prev_rsi is not None:
+            prev_rsi: Optional[tuple[float, float]] = None
+            for vi, rsi_v in enumerate(vis_rsi):
+                if rsi_v is None:
+                    prev_rsi = None
+                    continue
+                pt = (cx(vi), ry(rsi_v))
+                if prev_rsi is not None:
+                    shapes.append(cv.Line(
+                        x1=prev_rsi[0], y1=prev_rsi[1], x2=pt[0], y2=pt[1],
+                        paint=ft.Paint(color=_rsi_seg_color(rsi_v), stroke_width=1.2),
+                    ))
+                prev_rsi = pt
+
+            # Divergence dots — small filled squares at confirmed-signal candle RSI positions
+            div_sig_vis_indices = {
+                sig.candle_index - buf_offset
+                for sig in signals
+                if sig.divergence and 0 <= (sig.candle_index - buf_offset) < len(vis_rsi)
+            }
+            for vi in div_sig_vis_indices:
+                if vi < len(vis_rsi) and vis_rsi[vi] is not None:
+                    dot_x = cx(vi) - 3
+                    dot_y = ry(vis_rsi[vi]) - 3
+                    shapes.append(cv.Rect(
+                        x=dot_x, y=dot_y, width=6, height=6,
+                        paint=ft.Paint(color="#FFD700", style=ft.PaintingStyle.FILL),
+                    ))
+
+            # RSI label
+            shapes.append(cv.Text(
+                x=float(PAD_LEFT) + 4, y=rsi_top + 4,
+                spans=[ft.TextSpan(f"RSI {RSI_PERIOD}", style=ft.TextStyle(size=8, color=COL_RSI))],
+            ))
+
+        # ADX line — overlaid in the same sub-panel (0-100 maps to same ry() scale)
+        if vis_adx:
+            # ADX threshold line at 25 (dashed, dark teal)
+            adx_thresh_y = ry(ADX_THRESHOLD)
+            kx = float(PAD_LEFT)
+            while kx < chart_w - PAD_RIGHT:
+                kx2 = min(kx + 4.0, float(chart_w - PAD_RIGHT))
                 shapes.append(cv.Line(
-                    x1=prev_rsi[0], y1=prev_rsi[1], x2=pt[0], y2=pt[1],
-                    paint=ft.Paint(color=_rsi_seg_color(rsi_v), stroke_width=1.2),
+                    x1=kx, y1=adx_thresh_y, x2=kx2, y2=adx_thresh_y,
+                    paint=ft.Paint(color=COL_ADX_THRESH, stroke_width=0.8),
                 ))
-            prev_rsi = pt
+                kx += 7.0
+            shapes.append(cv.Text(
+                x=float(PAD_LEFT) - 20, y=adx_thresh_y - 5,
+                spans=[ft.TextSpan(str(ADX_THRESHOLD), style=ft.TextStyle(size=8, color=COL_ADX_THRESH))],
+            ))
 
-        # Divergence dots — small filled squares at confirmed-signal candle RSI positions
-        div_sig_vis_indices = {
-            sig.candle_index - buf_offset
-            for sig in signals
-            if sig.divergence and 0 <= (sig.candle_index - buf_offset) < len(vis_rsi)
-        }
-        for vi in div_sig_vis_indices:
-            if vi < len(vis_rsi) and vis_rsi[vi] is not None:
-                dot_x = cx(vi) - 3
-                dot_y = ry(vis_rsi[vi]) - 3
-                shapes.append(cv.Rect(
-                    x=dot_x, y=dot_y, width=6, height=6,
-                    paint=ft.Paint(color="#FFD700", style=ft.PaintingStyle.FILL),
-                ))
+            prev_adx: Optional[tuple[float, float]] = None
+            for vi, adx_v in enumerate(vis_adx):
+                if adx_v is None:
+                    prev_adx = None
+                    continue
+                # Color: cyan when ranging (<threshold), yellow when trending (≥threshold)
+                adx_col = "#FFD700" if adx_v >= ADX_THRESHOLD else COL_ADX
+                pt = (cx(vi), ry(adx_v))
+                if prev_adx is not None:
+                    shapes.append(cv.Line(
+                        x1=prev_adx[0], y1=prev_adx[1], x2=pt[0], y2=pt[1],
+                        paint=ft.Paint(color=adx_col, stroke_width=1.0),
+                    ))
+                prev_adx = pt
 
-        # RSI label
-        shapes.append(cv.Text(
-            x=float(PAD_LEFT) + 4, y=rsi_top + 4,
-            spans=[ft.TextSpan(f"RSI {RSI_PERIOD}", style=ft.TextStyle(size=8, color=COL_RSI))],
-        ))
+            # ADX label (right side of the RSI label)
+            lbl_offset = 56 if rsi_visible else 4
+            shapes.append(cv.Text(
+                x=float(PAD_LEFT) + lbl_offset, y=rsi_top + 4,
+                spans=[ft.TextSpan(f"ADX {ADX_PERIOD}", style=ft.TextStyle(size=8, color=COL_ADX))],
+            ))
 
     # In-chart legend (row 1: SMAs)
     lx, ly = PAD_LEFT + 4, PAD_TOP + 4
@@ -1453,19 +1680,29 @@ def _build_chart(
         cv.Text(x=lx + 76,  y=ly2 - 2,
                 spans=[ft.TextSpan("4H H/L",  style=ft.TextStyle(size=9, color="#909090"))]),
     ]
-    # In-chart legend (row 3: RSI)
-    if rsi_visible:
+    # In-chart legend (row 3: RSI + ADX)
+    if rsi_visible or adx_visible:
         ly3 = ly + 28
-        shapes += [
-            cv.Line(x1=lx,      y1=ly3 + 4, x2=lx + 12, y2=ly3 + 4,
-                    paint=ft.Paint(color=COL_RSI, stroke_width=1.5)),
-            cv.Text(x=lx + 14,  y=ly3 - 2,
-                    spans=[ft.TextSpan(f"RSI {RSI_PERIOD}", style=ft.TextStyle(size=9, color=COL_RSI))]),
-            cv.Rect(x=lx + 62, y=ly3, width=8, height=8,
-                    paint=ft.Paint(color="#FFD700", style=ft.PaintingStyle.FILL)),
-            cv.Text(x=lx + 74,  y=ly3 - 2,
-                    spans=[ft.TextSpan("Divergence", style=ft.TextStyle(size=9, color="#FFD700"))]),
-        ]
+        if rsi_visible:
+            shapes += [
+                cv.Line(x1=lx,      y1=ly3 + 4, x2=lx + 12, y2=ly3 + 4,
+                        paint=ft.Paint(color=COL_RSI, stroke_width=1.5)),
+                cv.Text(x=lx + 14,  y=ly3 - 2,
+                        spans=[ft.TextSpan(f"RSI {RSI_PERIOD}", style=ft.TextStyle(size=9, color=COL_RSI))]),
+                cv.Rect(x=lx + 62, y=ly3, width=8, height=8,
+                        paint=ft.Paint(color="#FFD700", style=ft.PaintingStyle.FILL)),
+                cv.Text(x=lx + 74,  y=ly3 - 2,
+                        spans=[ft.TextSpan("Divergence", style=ft.TextStyle(size=9, color="#FFD700"))]),
+            ]
+        if adx_visible:
+            adx_lx = lx + 140 if rsi_visible else lx
+            shapes += [
+                cv.Line(x1=adx_lx,      y1=ly3 + 4, x2=adx_lx + 12, y2=ly3 + 4,
+                        paint=ft.Paint(color=COL_ADX, stroke_width=1.5)),
+                cv.Text(x=adx_lx + 14,  y=ly3 - 2,
+                        spans=[ft.TextSpan(f"ADX {ADX_PERIOD} (<{ADX_THRESHOLD}=Range)",
+                                           style=ft.TextStyle(size=9, color=COL_ADX))]),
+            ]
     # In-chart legend (row 4: macro trend from SMA200)
     if _trend_bull is not None:
         ly4 = ly + 42
@@ -1476,6 +1713,17 @@ def _build_chart(
             cv.Text(x=lx + 14, y=ly4 - 2,
                     spans=[ft.TextSpan(f"Trend: {trend_lbl}",
                                        style=ft.TextStyle(size=9, color=sma200_col))]),
+        ]
+
+    # In-chart legend (row 5: range bands)
+    if vis_range_upper or vis_range_lower:
+        ly5 = ly + 56
+        shapes += [
+            cv.Line(x1=lx,     y1=ly5 + 4, x2=lx + 12, y2=ly5 + 4,
+                    paint=ft.Paint(color=COL_RANGE, stroke_width=1.5)),
+            cv.Text(x=lx + 14, y=ly5 - 2,
+                    spans=[ft.TextSpan(f"Range {RANGE_PERIOD} H/L",
+                                       style=ft.TextStyle(size=9, color=COL_RANGE))]),
         ]
 
     return cv.Canvas(shapes=shapes, width=chart_w, height=chart_h)
@@ -1502,6 +1750,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
     alert_enabled:        list[bool] = [True]
     sound_enabled:        list[bool] = [True]
     trend_filter_enabled: list[bool] = [True]   # False → allow counter-trend trades
+    range_filter_enabled: list[bool] = [True]   # False → allow non-ranging entries
     alert_task:           list        = [None]  # list[asyncio.Task | None]
 
     # ── Pan / zoom state ──────────────────────────────────────────────────────
@@ -1609,7 +1858,8 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
                 state.cached_sma50, state.cached_sma200, state.cached_signals,
                 chart_w, chart_h, n_visible,
                 state.key_levels, candle_w[0], price_scale[0], buf_start, state.sim_trades,
-                state.cached_rsi,
+                state.cached_rsi, state.cached_adx,
+                state.cached_range_upper, state.cached_range_lower,
             )
             chart_container_ref.current.content = chart_canvas
             chart_container_ref.current.update()
@@ -1788,6 +2038,10 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
         # 2.5. Pro-trend filter — skip counter-trend signals when filter is on
         if trend_filter_enabled[0] and not sig.pro_trend:
+            return
+
+        # 2.75. Range filter — skip non-ranging signals when filter is on
+        if range_filter_enabled[0] and not sig.in_range:
             return
 
         if sig.candle_index >= len(candles):
@@ -1984,14 +2238,17 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
         loop = asyncio.get_running_loop()
 
-        # Heavy computation off the event loop (SMA + RSI + signal detection)
-        sma50, sma200, rsi, signals = await loop.run_in_executor(
+        # Heavy computation off the event loop (SMA + RSI + ADX + range bands + signals)
+        sma50, sma200, rsi, adx, range_upper, range_lower, signals = await loop.run_in_executor(
             None, _compute_heavy, candles, state.key_levels,
         )
-        state.cached_sma50   = sma50
-        state.cached_sma200  = sma200
-        state.cached_rsi     = rsi
-        state.cached_signals = signals
+        state.cached_sma50        = sma50
+        state.cached_sma200       = sma200
+        state.cached_rsi          = rsi
+        state.cached_adx          = adx
+        state.cached_range_upper  = range_upper
+        state.cached_range_lower  = range_lower
+        state.cached_signals      = signals
 
         # Trade logic (fast — stays on event loop)
         for sig in signals:
@@ -2005,7 +2262,8 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         chart_canvas = await loop.run_in_executor(
             None, _build_chart,
             candles, sma50, sma200, signals, chart_w, chart_h, n_visible,
-            state.key_levels, candle_w[0], price_scale[0], buf_start, state.sim_trades, rsi,
+            state.key_levels, candle_w[0], price_scale[0], buf_start, state.sim_trades,
+            rsi, adx, range_upper, range_lower,
         )
 
         # ── UI updates (back on event loop) ───────────────────────────────────
@@ -2383,7 +2641,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
     # ── Lightweight chart-only redraw (used by pan/zoom) ─────────────────────
     async def _redraw_chart() -> None:
-        """Rebuild canvas using cached SMA/RSI/signals — skips all expensive computation."""
+        """Rebuild canvas using cached SMA/RSI/ADX/signals — skips all expensive computation."""
         state   = _state()
         candles = list(state.buffer)
         if not candles:
@@ -2397,7 +2655,8 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             state.cached_sma50, state.cached_sma200, state.cached_signals,
             chart_w, chart_h, n_visible,
             state.key_levels, candle_w[0], price_scale[0], buf_start, state.sim_trades,
-            state.cached_rsi,
+            state.cached_rsi, state.cached_adx,
+            state.cached_range_upper, state.cached_range_lower,
         )
         if chart_container_ref.current:
             chart_container_ref.current.content = chart_canvas
@@ -2496,10 +2755,14 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
     sma50_init   = _compute_sma(candles_init, 50)
     sma200_init  = _compute_sma(candles_init, 200)
     rsi_init     = _compute_rsi(candles_init)
+    adx_init     = _compute_adx(candles_init)
+    range_upper_init, range_lower_init = _compute_range_bands(candles_init)
     signals_init = detect_signals(candles_init)
     for _s in signals_init:
         _s.divergence = _check_rsi_divergence(_s, candles_init, rsi_init)
         _s.pro_trend  = _check_pro_trend(_s, candles_init, sma200_init)
+        _s.in_range   = _check_range_rotation(_s, candles_init, adx_init,
+                                               range_upper_init, range_lower_init)
 
     # ── Initial display values ────────────────────────────────────────────────
     last_price_str = f"${candles_init[-1].close:,.2f}" if candles_init else "Connecting…"
@@ -2595,6 +2858,9 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
                         buf_start=max(0, len(candles_init) - init_n_visible),
                         sim_trades=_state().sim_trades,
                         rsi=rsi_init,
+                        adx=adx_init,
+                        range_upper=range_upper_init,
+                        range_lower=range_lower_init,
                     ),
                 ),
                 alert_overlay,
@@ -2665,6 +2931,15 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
                 check_color="white",
                 label_style=ft.TextStyle(size=12, color=COL_LABEL),
                 on_change=lambda e: trend_filter_enabled.__setitem__(0, e.control.value),
+            ),
+            ft.Container(width=4),
+            ft.Checkbox(
+                label="Range Filter",
+                value=True,
+                active_color=COL_ADX,
+                check_color="white",
+                label_style=ft.TextStyle(size=12, color=COL_LABEL),
+                on_change=lambda e: range_filter_enabled.__setitem__(0, e.control.value),
             ),
         ],
         spacing=4,

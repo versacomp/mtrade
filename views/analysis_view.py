@@ -394,9 +394,14 @@ def _build_trade_log(trades: list) -> ft.Control:
 
 # ── Back-test results block ────────────────────────────────────────────────────
 
-def _build_bt_results(bt_trades: list, sym: str, trend_on: bool) -> ft.Control:
+def _build_bt_results(bt_trades: list, sym: str, trend_on: bool, range_on: bool = True) -> ft.Control:
     kpi = compute_kpis(bt_trades)
-    filter_label = "trend filter ON" if trend_on else "trend filter OFF"
+    filters = []
+    if trend_on:
+        filters.append("trend ✓")
+    if range_on:
+        filters.append("range ✓")
+    filter_label = (", ".join(filters) if filters else "no filters")
     pf  = kpi["profit_factor"]
     pf_s = "∞" if not math.isfinite(pf) else f"{pf:.2f}×"
 
@@ -452,6 +457,7 @@ def build_analysis_view(client, page: ft.Page) -> ft.View:
     active_sym:   list[str]  = [QUICK_SYMBOLS[0]]
     bt_running:   list[bool] = [False]
     trend_on:     list[bool] = [True]
+    range_on:     list[bool] = [True]
 
     # ── Refs ──────────────────────────────────────────────────────────────────
     chip_row_ref    = ft.Ref[ft.Container]()
@@ -573,7 +579,7 @@ def build_analysis_view(client, page: ft.Page) -> ft.View:
                 None, prepare_backtest, sym,
             )
             bt_trades = await loop.run_in_executor(
-                None, simulate_trades, signals, candles, trend_on[0],
+                None, simulate_trades, signals, candles, trend_on[0], range_on[0],
             )
             if bt_result_ref.current:
                 if not candles:
@@ -589,7 +595,7 @@ def build_analysis_view(client, page: ft.Page) -> ft.View:
                     )
                 else:
                     bt_result_ref.current.content = _build_bt_results(
-                        bt_trades, sym, trend_on[0]
+                        bt_trades, sym, trend_on[0], range_on[0]
                     )
                 bt_result_ref.current.update()
         finally:
@@ -706,10 +712,17 @@ def build_analysis_view(client, page: ft.Page) -> ft.View:
                     label_style=ft.TextStyle(size=12, color=COL_LABEL),
                     on_change=lambda e: trend_on.__setitem__(0, e.control.value),
                 ),
+                ft.Checkbox(
+                    label="Range filter",
+                    value=True,
+                    active_color="#00BCD4",
+                    check_color="black",
+                    label_style=ft.TextStyle(size=12, color=COL_LABEL),
+                    on_change=lambda e: range_on.__setitem__(0, e.control.value),
+                ),
                 ft.ElevatedButton(
+                    "Run Back-test",
                     ref=bt_btn_ref,
-                    text="Run Back-test",
-                    icon=ft.Icons.PLAY_ARROW_ROUNDED,
                     on_click=_on_run_backtest,
                     style=ft.ButtonStyle(
                         bgcolor=COL_CHIP_ACT,
