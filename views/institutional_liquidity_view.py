@@ -128,6 +128,10 @@ PAD_LEFT   = 62
 PAD_RIGHT  = 15
 CHART_W    = PAD_LEFT + VISIBLE_CANDLES * CANDLE_STEP + PAD_RIGHT  # ~797 px
 
+# Volume profile
+VP_N_BINS = 24   # price buckets
+VP_MAX_W  = 54   # max bar width in pixels (stays inside PAD_LEFT=62)
+
 # Colours
 COL_BG       = "#111111"
 COL_GRID     = "#252525"
@@ -140,6 +144,8 @@ COL_SMA200   = "#42A5F5"
 COL_SIG_BULL = "#00E676"
 COL_SIG_BEAR = "#FF1744"
 COL_CHIP_ACT = "#FF9800"   # active chip colour
+COL_VP_BAR   = "#1e3a50"   # volume profile bar (non-POC)
+COL_VP_POC   = "#FF9800"   # point of control
 
 
 # ── Data classes ───────────────────────────────────────────────────────────────
