@@ -1969,6 +1969,9 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         threading.Thread(
             target=_save_sim_trades, args=(sym, state.sim_trades), daemon=True,
         ).start()
+        # If live trading is active, also submit real orders
+        if _live_enabled and state.contract_sym:
+            asyncio.create_task(_place_live_orders(trade, state.contract_sym))
 
     def _close_at_market(trade: SimTrade, candles: list) -> None:
         """
