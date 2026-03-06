@@ -18,7 +18,7 @@ Before participating in live markets, consult a qualified financial advisor and 
 
 ## Features
 
-- **OAuth2 / sandbox login** — authenticates against tastytrade's sandbox environment (`api.cert.tastyworks.com`)
+- **OAuth2 / sandbox login** — authenticates against the tastytrade sandbox (`api.cert.tastyworks.com`) or production environment, selectable at login
 - **Live market dashboard** — real-time quotes for major US indices (S&P 500, Nasdaq-100, Dow Jones)
 - **Interactive candlestick chart** — any symbol, 1-minute candles, pan and zoom via mouse/touch
 - **Institutional Liquidity view** — real-time signal detection across 40+ futures instruments with simulated trade management
@@ -28,29 +28,87 @@ Before participating in live markets, consult a qualified financial advisor and 
 
 ---
 
-## Setup
+## Quick Start
 
-### 1. Create a virtual environment and install dependencies
+### Step 1 — Create a tastytrade Sandbox account
+
+The sandbox is a free developer environment that mirrors the production API but resets every 24 hours (positions and balances are cleared; your user account persists).
+
+1. Go to **[developer.tastytrade.com/sandbox](https://developer.tastytrade.com/sandbox/)** and click **"Register here"** to create a sandbox user account. If you already have one, sign in directly.
+2. Once logged in, you can create test accounts, submit paper trades, fetch balances and positions, and stream delayed market data — all without risking real capital.
+
+> **Note:** Sandbox quotes are **15 minutes delayed**. Real-time streaming requires a production tastytrade account.
+
+---
+
+### Step 2 — (Optional) Register an OAuth application
+
+Username/password login works out of the box. If you prefer OAuth2 token-based authentication (no password stored):
+
+1. Sign in to your **production** tastytrade account at [my.tastytrade.com](https://my.tastytrade.com/app.html#/manage/api-access/oauth-applications) and navigate to **Manage → API Access → OAuth Applications**.
+2. Create a new application — note the **Client ID** and **Client Secret**.
+3. Complete the OAuth flow to obtain a **Refresh Token** for your application.
+4. Repeat on the sandbox portal for a separate set of sandbox OAuth credentials.
+5. Add all values to your `.env` file (see Step 4).
+
+---
+
+### Step 3 — Install dependencies
+
+Requires **Python 3.11+**.
 
 ```bash
+git clone https://github.com/your-org/m-trade.git
+cd m-trade
+
 python -m venv .venv
 .venv\Scripts\activate        # Windows
-# or: source .venv/bin/activate  # Linux/macOS
+# or: source .venv/bin/activate  # macOS / Linux
 
 pip install -r requirements.txt
 ```
 
-### 2. Configure tastytrade credentials
+---
 
-Log in with your tastytrade **sandbox** username and password directly in the app UI on first launch. OAuth2 refresh tokens are supported via the `api/oauth.py` module if you have an OAuth application configured.
+### Step 4 — Configure credentials
 
-### 3. Run the app
+```bash
+cp .env.example .env
+```
+
+Open `.env` and fill in your credentials. At minimum you need either a sandbox username/password (for UI login) or the OAuth fields:
+
+```ini
+# Sandbox — used when "Sandbox" is selected on the login screen
+TASTYTRADE_API_BASE_SANDBOX=https://api.cert.tastyworks.com
+TASTYTRADE_CLIENT_ID_SANDBOX=your-sandbox-client-id
+TASTYTRADE_CLIENT_SECRET_SANDBOX=your-sandbox-client-secret
+TASTYTRADE_REFRESH_TOKEN_SANDBOX=your-sandbox-refresh-token
+
+# Production — used when "Production" is selected on the login screen
+TASTYTRADE_API_BASE=https://api.tastyworks.com
+TASTYTRADE_CLIENT_ID=your-production-client-id
+TASTYTRADE_CLIENT_SECRET=your-production-client-secret
+TASTYTRADE_REFRESH_TOKEN=your-production-refresh-token
+```
+
+OAuth fields are only required if you use **"Sign in with OAuth"**. Username/password login works without them.
+
+---
+
+### Step 5 — Run the app
 
 ```bash
 python main.py
 ```
 
-The app opens as a native desktop window. To run in a browser instead, change `view=ft.AppView.FLET_APP` to `view=ft.AppView.WEB_BROWSER` in `main.py`.
+The app opens as a native desktop window.
+
+1. On the login screen, use the **Sandbox / Production** toggle to select your environment (defaults to Sandbox).
+2. Sign in with your tastytrade username and password, or click **"Sign in with OAuth"** to use your `.env` credentials.
+3. After login, the nav bar shows a **SANDBOX** or **PRODUCTION** badge confirming the active environment.
+
+> To run in a browser instead of a native window, change `view=ft.AppView.FLET_APP` to `view=ft.AppView.WEB_BROWSER` in `main.py`.
 
 ---
 
@@ -90,6 +148,8 @@ m-trade/
 ---
 
 ## Institutional Liquidity Strategy
+
+This project focuses on algorithmic trading using a liquidity grab reversal strategy with filters using RSI divergence and ADX < 25.  These work well with the volatility of the equity futures market such as S & P 500 or NASDAQ.  Other strategies could work well in these markets.  This project is looking for developers with a strong opinion on a strategy and would like to contribute to the project.
 
 The `/liquidity` view implements an **Institutional Liquidity Grab Reversal** strategy on 1-minute futures candles. The premise is that institutions intentionally push price through visible swing highs and lows to fill large orders against retail stop clusters, before reversing hard in the opposite direction.
 
