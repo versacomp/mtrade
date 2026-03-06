@@ -11,6 +11,8 @@ import logging
 import logging.handlers
 import flet as ft
 
+import config
+
 from views.analysis_view import build_analysis_view
 from views.chart_view import build_chart_view
 from views.dashboard_view import build_dashboard_view
@@ -53,20 +55,23 @@ def main(page: ft.Page) -> None:
     """MTrade main app entry point."""
     _configure_logging()
     page.title = "MTrade"
-    page.theme_mode = ft.ThemeMode.SYSTEM
+    _saved = config.get_pref("theme_mode", "system")
+    page.theme_mode = {
+        "dark":  ft.ThemeMode.DARK,
+        "light": ft.ThemeMode.LIGHT,
+    }.get(_saved, ft.ThemeMode.SYSTEM)
     page.padding = 0
     page.spacing = 0
 
     # Mobile-friendly: viewport meta, responsive layout
     page.theme = ft.Theme(
-        color_scheme_seed=ft.Colors.BLUE_700,
+        color_scheme_seed=ft.Colors.BLUE_500,
         visual_density=ft.VisualDensity.COMPACT,
         page_transitions=ft.PageTransitionsTheme(
             android=ft.PageTransitionTheme.ZOOM,
             ios=ft.PageTransitionTheme.CUPERTINO,
         ),
     )
-    page.theme_mode = ft.ThemeMode.SYSTEM
 
     # Responsive breakpoints for mobile
     page.horizontal_alignment = ft.CrossAxisAlignment.STRETCH
