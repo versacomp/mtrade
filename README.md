@@ -170,7 +170,7 @@ m-trade/
 
 ## Institutional Liquidity Strategy
 
-This project focuses on algorithmic trading using a liquidity grab reversal strategy with filters using RSI divergence and ADX < 25.  These work well with the volatility of the equity futures market such as S & P 500 or NASDAQ.  Other strategies could work well in these markets.  This project is looking for developers with a strong opinion on a strategy and would like to contribute to the project.
+This project focuses on algorithmic trading using an implementation of Institutional Liquidity Grab Reversal strategy but is designed to work with multiple strategies. Other strategies could work well in these markets.  This project is looking for developers with a strong opinion on a strategy and would like to contribute to the project.
 
 The `/liquidity` view implements an **Institutional Liquidity Grab Reversal** strategy on 1-minute futures candles. The premise is that institutions intentionally push price through visible swing highs and lows to fill large orders against retail stop clusters, before reversing hard in the opposite direction.
 
