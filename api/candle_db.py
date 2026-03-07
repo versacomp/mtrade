@@ -63,7 +63,29 @@ def reset_db() -> None:
 
 
 class CandleDB:
+    """
+    SQLite-backed candle store.
+
+    Manages a single connection to the configured database file and exposes
+    high-level read/write helpers for OHLCV candle data.  The schema uses a
+    composite unique key ``(symbol, interval, ts_ms)`` so that ``INSERT OR
+    REPLACE`` naturally deduplicates live streaming updates.
+
+    Typical usage::
+
+        db = get_db()
+        db.insert("MES", "1m", candle_dict)
+        rows = db.query("MES", "1m", from_ms=..., to_ms=...)
+    """
+
     def __init__(self, db_path: Path | None = None) -> None:
+        """
+        Open (or create) the SQLite database at *db_path*.
+
+        If *db_path* is ``None``, the path is read from the ``candle_db_path``
+        user preference, falling back to ``DEFAULT_DB_PATH``.  Parent directories
+        are created automatically.
+        """
         if db_path is None:
             raw = config.get_pref("candle_db_path", "")
             db_path = Path(raw) if raw else DEFAULT_DB_PATH
@@ -166,4 +188,5 @@ class CandleDB:
         }
 
     def close(self) -> None:
+        """Close the underlying SQLite connection."""
         self._conn.close()

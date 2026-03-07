@@ -36,6 +36,14 @@ class TastytradeClient:
         refresh_token: str = "",
         session_token: str | None = None,
     ) -> None:
+        """
+        Initialise the client for *base_url*.
+
+        When *client_id*, *client_secret*, and *refresh_token* are all provided
+        an :class:`~api.oauth.TastytradeOAuth` helper is created so that the
+        session token is refreshed automatically before each request.  Supplying
+        *session_token* directly skips OAuth and uses that token as-is.
+        """
         self.base_url = base_url.rstrip("/")
         self._session_token: str | None = session_token
         self._token_expires_at: float = 0.0
@@ -80,6 +88,7 @@ class TastytradeClient:
         self._token_expires_at = expires_at or (time.time() + 900)
 
     def _headers(self) -> dict[str, str]:
+        """Build the authorisation headers required by every tastytrade API request."""
         token = self._ensure_token()
         # tastytrade uses Bearer token for OAuth; raw token also accepted for sessions
         auth_value = f"Bearer {token}" if not token.startswith("Bearer ") else token
@@ -89,8 +98,8 @@ class TastytradeClient:
         }
 
     def _get(self, path: str, params: dict | None = None) -> dict[str, Any]:
+        """Perform an authenticated GET request and return the parsed JSON response dict; raise on HTTP errors."""
         url = f"{self.base_url}{path}"
-        log.debug("GET → %s | params=%s", url, params)
         try:
             r = requests.get(url, headers=self._headers(), params=params, timeout=30)
             log.debug("GET ← %s %s | %s", r.status_code, r.reason, url)
@@ -105,8 +114,8 @@ class TastytradeClient:
             raise
 
     def _delete(self, path: str) -> dict[str, Any]:
+        """Perform an authenticated DELETE request and return the parsed JSON response dict (empty dict if no content); raise on HTTP errors."""
         url = f"{self.base_url}{path}"
-        log.debug("DELETE → %s", url)
         try:
             r = requests.delete(url, headers=self._headers(), timeout=30)
             log.debug("DELETE ← %s %s | %s", r.status_code, r.reason, url)
@@ -121,8 +130,8 @@ class TastytradeClient:
             raise
 
     def _post(self, path: str, json: dict | None = None) -> dict[str, Any]:
+        """Perform an authenticated POST request with optional JSON body and return the parsed JSON response dict; raise on HTTP errors."""
         url = f"{self.base_url}{path}"
-        log.debug("POST → %s | body=%s", url, json)
         try:
             r = requests.post(url, headers=self._headers(), json=json, timeout=30)
             log.debug("POST ← %s %s | %s", r.status_code, r.reason, url)

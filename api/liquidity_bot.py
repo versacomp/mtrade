@@ -11,6 +11,16 @@ class LiquidityBot:
     and executes a Liquidity Grab Reversal strategy with Trend and ADX filters.
     """
     def __init__(self, username, password, symbol='/MES', buffer_size=300):
+        """
+        Initialise the bot with credentials and trading parameters.
+
+        Args:
+            username:    tastytrade account username or email.
+            password:    tastytrade account password.
+            symbol:      Futures symbol to trade (default ``'/MES'``).
+            buffer_size: Number of 1-minute bars to retain in memory; clamped to a
+                         minimum of 250 so that the 200-period SMA always has enough data.
+        """
         self.username = username
         self.password = password
         self.symbol = symbol
@@ -100,16 +110,27 @@ class LiquidityBot:
             print(f"[ALERT] {df.index[-1]} | SELL | Price: {last_bar['Close']:.2f} | ADX: {last_bar['ADX']:.2f}")
 
     async def authenticate(self):
+        """Open a tastytrade session using stored username/password credentials."""
         print(f"Authenticating {self.username}...")
         self.session = Session(self.username, self.password)
         print("Authenticated.")
 
     async def setup_stream(self):
+        """Create a DXLink streamer and subscribe to trade quotes for the target symbol."""
         self.streamer = DXLinkStreamer(self.session)
         await self.streamer.subscribe_trade([self.symbol])
         print(f"Subscribed to {self.symbol}")
 
     def update_bar(self, price, timestamp):
+        """
+        Incorporate a new trade tick into the current 1-minute OHLCV bar.
+
+        When the tick belongs to a new minute the completed bar is appended to
+        ``bar_data``, the rolling buffer is trimmed to ``buffer_size``,
+        ``run_strategy`` is called to check for signals, and a fresh bar is
+        opened.  If the tick falls within the current minute only the High,
+        Low, and Close fields are updated.
+        """
         trade_time = pd.to_datetime(timestamp, unit='ms') if isinstance(timestamp, (int, float)) else timestamp
         trade_minute = trade_time.floor('T')
 
@@ -131,6 +152,13 @@ class LiquidityBot:
             self.current_bar['Close'] = price
 
     async def run(self):
+        """
+        Authenticate, open the DXLink stream, and process incoming quotes indefinitely.
+
+        Each incoming ``Quote`` event is forwarded to ``update_bar`` so that
+        1-minute OHLCV bars are built in real time and the strategy is evaluated
+        at the close of every bar.
+        """
         await self.authenticate()
         await self.setup_stream()
         print("Bot running... Press Stop to exit.")

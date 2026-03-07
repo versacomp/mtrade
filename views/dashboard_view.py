@@ -29,6 +29,7 @@ def build_dashboard_view(client, page: ft.Page) -> ft.View:
     chart_data_spots: list[list[ft.LineChartData]] = []
 
     def fetch_quotes() -> None:
+        """Fetch live market quotes for the configured symbols; fall back to demo data on failure."""
         nonlocal quotes
         api_ok = False
         try:
@@ -57,6 +58,7 @@ def build_dashboard_view(client, page: ft.Page) -> ft.View:
             cs.set_status(cs.ConnState.LIVE, "REST API connected")
 
     def build_quote_cards() -> list[ft.Control]:
+        """Build a list of ft.Card widgets showing each symbol's current price."""
         cards = []
         for sym, label in zip(symbols_to_fetch, labels_display):
             price = quotes.get(sym, 0.0)

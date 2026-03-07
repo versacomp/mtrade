@@ -45,7 +45,7 @@ _DIM      = "#555555"
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _fmt(v: float, decimals: int = 2, prefix: str = "", plus: bool = False) -> str:
-    """Format a float, replacing ±inf with '∞' / '—'."""
+    """Format *v* as a fixed-point string; renders ±inf as '∞' or '—'."""
     if not math.isfinite(v):
         return "∞" if v > 0 else "—"
     sign = "+" if plus and v > 0 else ""
@@ -53,6 +53,7 @@ def _fmt(v: float, decimals: int = 2, prefix: str = "", plus: bool = False) -> s
 
 
 def _trend_color(v: float, good_positive: bool = True) -> str:
+    """Return a hex colour for *v*: green when sign matches *good_positive*, red otherwise."""
     if v == 0:
         return "white"
     positive = v > 0
@@ -61,6 +62,7 @@ def _trend_color(v: float, good_positive: bool = True) -> str:
 
 def _kpi_card(label: str, value: str, color: str = "white",
               subtitle: str = "") -> ft.Control:
+    """Build a compact dark card displaying a KPI *label*, formatted *value*, and optional *subtitle*."""
     children: list[ft.Control] = [
         ft.Text(label, size=11, color=COL_LABEL),
         ft.Text(value, size=22, weight=ft.FontWeight.BOLD, color=color),
@@ -80,6 +82,7 @@ def _kpi_card(label: str, value: str, color: str = "white",
 
 
 def _section(title: str) -> ft.Text:
+    """Return a bold white section heading text widget."""
     return ft.Text(title, size=14, weight=ft.FontWeight.W_600, color="white")
 
 
@@ -205,6 +208,7 @@ def _build_equity_canvas(equity: list[float], width: int, height: int = 160) -> 
 # ── KPI row ────────────────────────────────────────────────────────────────────
 
 def _build_kpi_row(kpi: dict) -> ft.Control:
+    """Arrange all strategy KPI cards into a wrapping row."""
     pf   = kpi["profit_factor"]
     pf_s = "∞" if not math.isfinite(pf) else f"{pf:.2f}×"
     rec  = kpi["recovery"]
@@ -246,6 +250,7 @@ def _build_kpi_row(kpi: dict) -> ft.Control:
 # ── Source breakdown table ─────────────────────────────────────────────────────
 
 def _build_source_table(src_stats: dict) -> ft.Control:
+    """Build a DataTable showing per-signal-source win-rate and average P&L."""
     if not src_stats:
         return ft.Text("No signal source data", color=COL_LABEL, size=12)
 
@@ -286,6 +291,7 @@ def _build_source_table(src_stats: dict) -> ft.Control:
 # ── Protection breakdown ───────────────────────────────────────────────────────
 
 def _build_protection_card(kpi: dict) -> ft.Control:
+    """Build a compact card showing how each ratchet-stop stage contributed to closed trades."""
     total = kpi["closed"]
 
     def pct(n: int) -> str:
@@ -340,6 +346,7 @@ def _build_protection_card(kpi: dict) -> ft.Control:
 # ── Trade log table ────────────────────────────────────────────────────────────
 
 def _build_trade_log(trades: list) -> ft.Control:
+    """Build a DataTable of the most recent 60 closed trades sorted newest-first."""
     closed = sorted(
         [t for t in trades if t.status in ("WIN", "LOSS")],
         key=lambda t: t.closed_at or 0,
@@ -395,6 +402,7 @@ def _build_trade_log(trades: list) -> ft.Control:
 # ── Back-test results block ────────────────────────────────────────────────────
 
 def _build_bt_results(bt_trades: list, sym: str, trend_on: bool, range_on: bool = True) -> ft.Control:
+    """Render a complete back-test results block including KPIs, equity curve, and source breakdown."""
     kpi = compute_kpis(bt_trades)
     filters = []
     if trend_on:
@@ -472,9 +480,11 @@ def build_analysis_view(client, page: ft.Page) -> ft.View:
 
     # ── Render helpers ────────────────────────────────────────────────────────
     def _chart_width() -> int:
+        """Return a pixel width for the equity-curve canvas based on the current page width."""
         return max(480, int(page.width or 900)) - 32
 
     def _render_live(sym: str) -> None:
+        """Reload SimTrade data for *sym* and refresh all live-performance widgets."""
         trades = _load_sim_trades(sym)
         kpi    = compute_kpis(trades)
         cw     = _chart_width()
@@ -516,6 +526,7 @@ def build_analysis_view(client, page: ft.Page) -> ft.View:
         page.update()
 
     def _switch_symbol(sym: str) -> None:
+        """Change the active symbol, update the chip row, and re-render live data."""
         sym = sym.strip().upper()
         if not sym:
             return
@@ -526,6 +537,7 @@ def build_analysis_view(client, page: ft.Page) -> ft.View:
         _render_live(sym)
 
     def _build_chip_row() -> ft.Control:
+        """Build a row of symbol-picker chip buttons with the active symbol highlighted."""
         chips: list[ft.Control] = []
         for s in QUICK_SYMBOLS:
             if s == active_sym[0]:
@@ -558,6 +570,7 @@ def build_analysis_view(client, page: ft.Page) -> ft.View:
 
     # ── Back-test ─────────────────────────────────────────────────────────────
     async def _on_run_backtest(e) -> None:
+        """Run the back-test engine in a thread executor and display the results."""
         if bt_running[0]:
             return
         bt_running[0] = True

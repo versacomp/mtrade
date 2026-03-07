@@ -40,6 +40,13 @@ class DXLinkStreamer:
     CHANNEL_ID = 1
 
     def __init__(self, dxlink_url: str, token: str) -> None:
+        """
+        Initialise the streamer.
+
+        Args:
+            dxlink_url: The WebSocket URL from the ``/api-quote-tokens`` response.
+            token:      The DXLink authentication token from the same response.
+        """
         self.dxlink_url = dxlink_url
         self.token = token
 
