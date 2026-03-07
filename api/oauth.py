@@ -62,15 +62,17 @@ class TastytradeOAuth:
         with OAuth params if needed.
         """
         # Try OAuth2 standard endpoint first
+        token_url = f"{self.base_url}/oauth/token"
+        session_url = f"{self.base_url}/sessions"
         endpoints_to_try = [
-            (f"{self.base_url}/oauth/token", {
+            (token_url, {
                 "grant_type": "refresh_token",
                 "refresh_token": self.refresh_token,
                 "client_id": self.client_id,
                 "client_secret": self.client_secret,
             }),
             # tastytrade may use /sessions with refresh_token
-            (f"{self.base_url}/sessions", {
+            (session_url, {
                 "refresh_token": self.refresh_token,
                 "client_id": self.client_id,
                 "client_secret": self.client_secret,
