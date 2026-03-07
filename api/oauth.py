@@ -97,7 +97,12 @@ class TastytradeOAuth:
                 log.warning("OAuth token exchange ✗ %s | %s | %s", exc.response.status_code, url, body)
                 continue
             except requests.RequestException as exc:
-                log.warning("OAuth token exchange ✗ network error | %s | %s", url, exc)
+                log.warning(
+                    "OAuth token exchange ✗ network error | %s | %s: %s",
+                    url,
+                    type(exc).__name__,
+                    str(exc),
+                )
                 continue
 
         log.error("OAuth token exchange — all endpoints failed. Check credentials and base URL.")
