@@ -7,6 +7,48 @@ MTrade uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased] — 2026-xx-xx
+
+### Added
+
+#### Configurable Candle Interval
+- `api/dxlink_streamer.py` — `stream_candles()` accepts an `interval` parameter using dxFeed aggregation-period syntax (`1s`, `5s`, `15s`, `30s`, `1m`, `3m`, `5m`, `15m`, `30m`, `1h`, `4h`, `1d`); defaults to `1m` for full backward compatibility
+- History back-fill window scales with the selected interval so the buffer always covers approximately the same wall-clock span
+
+#### Candle Database (`api/candle_db.py`)
+- SQLite store at `~/.mtrade/candles.db` (path configurable) that persists every incoming candle with `INSERT OR REPLACE` deduplication keyed on `(symbol, interval, ts_ms)`
+- `CandleDB.query(symbol, interval, from_ms, to_ms, limit)` returns `list[dict]` suitable for replay and back-testing without any API calls
+- `CandleDB.symbols()` — inventory of all stored series with candle counts
+- `CandleDB.delete(symbol, interval)` — targeted or full wipe
+- `CandleDB.stats()` — total candles, file size, path
+- Module-level singleton (`get_db()` / `reset_db()`) shared across the application
+
+#### Settings View (`/settings`)
+- New `views/settings_view.py` — accessible via the nav bar
+- **Streaming section**: candle interval dropdown with save to `~/.mtrade/preferences.json`; change takes effect on next Liquidity view open
+- **Database section**: enable/disable recording switch, database path override, live stats table showing per-series candle counts, per-series and global Clear buttons, Refresh button
+- All preferences stored under existing keys: `candle_interval`, `candle_db_enabled`, `candle_db_path`
+
+#### Market Hours Awareness (`api/market_hours.py`)
+- CME Globex equity-index futures schedule modelled in ET: open Sunday 6:00 PM, daily maintenance 5:00–6:00 PM, weekend close Friday 5:00 PM
+- `is_market_open()`, `market_status()` → `(bool, "Open · closes in Xh Ym")`, `seconds_until_open()`
+- Liquidity view Phase 2 stream loop: when market is closed, DXLink connection is skipped entirely and demo mode activates immediately; status dot shows `"Closed · opens in Xh Ym"`; state is re-checked every 30 seconds
+- When market reopens the full 10-retry DXLink reconnect sequence is attempted automatically
+
+#### AppBar ET Clock
+- Live `HH:MM:SS ET` clock displayed in every AppBar using a self-terminating async task per view; task stops automatically when the AppBar is replaced on navigation
+
+### Changed
+
+#### Compact Navigation Bar
+- Nav buttons replaced with icon-only `ft.IconButton` controls (`DASHBOARD`, `CANDLESTICK_CHART`, `WATER_DROP`, `ANALYTICS`, `SETTINGS`) with page-name tooltips; active page shown with white icon and subtle highlight, inactive pages dimmed
+- Status text label (`CONNECTED / DEMO / OFFLINE`) removed; full detail available in the status dot tooltip
+- Environment pill badge (`SANDBOX / PRODUCTION`) replaced with an 8 px coloured dot (amber = sandbox, green = production) with URL tooltip
+- Username text removed; surfaced in the logout button tooltip
+- Overall AppBar content width reduced by approximately half
+
+---
+
 ## [0.0.1] — 2026-03-06
 
 Initial public release.
@@ -79,4 +121,5 @@ Initial public release.
 
 ---
 
+[0.0.2]: https://github.com/your-org/m-trade/releases/tag/v0.0.2
 [0.0.1]: https://github.com/your-org/m-trade/releases/tag/v0.0.1
