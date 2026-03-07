@@ -2,6 +2,27 @@
 
 A trading analysis tool that connects to the tastytrade REST API and DXLink real-time streaming service. Built with Flet (Python/Flutter) and designed to run as a desktop application.
 
+![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
+![Version](https://img.shields.io/badge/version-0.0.1-informational)
+![Python](https://img.shields.io/badge/python-3.11%2B-blue)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
+
+---
+
+## Description
+
+MTrade is an open-source desktop trading analysis tool built for futures traders who want to study and automate a rules-based strategy without leaving Python. It streams live 1-minute candle data directly from tastytrade's DXLink WebSocket feed and renders an interactive candlestick chart with signal overlays, indicator sub-panels, and simulated trade management — all in a single native window.
+
+The core strategy is an **Institutional Liquidity Grab Reversal**: a mean-reversion approach that identifies candles where price sweeps through a visible swing high or low (triggering retail stop orders) and then closes back inside the range, signalling a likely reversal. Signals are filtered through RSI divergence, an SMA 200 trend alignment check, and an ADX-based range-rotation gate to reduce false positives. Every Prime-tier signal that passes all filters opens a simulated trade with a ratcheting stop that automatically advances to breakeven and then trails as the trade moves in favour.
+
+The project is designed to be **strategy-agnostic at its core** — the signal detection, filter, and trade management layers are modular, and the codebase is actively looking for contributors who want to bring their own strategy ideas. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to get involved.
+
+**Key design goals:**
+- Real-time data with graceful demo fallback — the chart is always usable, even without a live API connection
+- Sandbox-first — the default environment is tastytrade's certification sandbox; switching to production is an explicit user action
+- Transparent simulation — paper trades and back-test results are stored locally and never sent anywhere
+- Open and extensible — MIT licensed, modular architecture, no lock-in to a specific broker beyond the tastytrade API client
+
 ---
 
 ## Disclaimer
@@ -312,3 +333,17 @@ Market data arrives via **DXLink** — tastytrade's WebSocket-based market data 
 - [tastytrade API Overview](https://developer.tastytrade.com/api-overview/)
 - [tastytrade OAuth](https://developer.tastytrade.com/oauth/)
 - [tastytrade Sandbox](https://developer.tastytrade.com/sandbox/)
+
+---
+
+## Contributing
+
+Contributions are welcome — especially new strategy ideas. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide.
+
+Please read our [Code of Conduct](CODE_OF_CONDUCT.md) before participating. Security issues should be reported privately via [SECURITY.md](SECURITY.md) rather than as public issues.
+
+---
+
+## License
+
+MTrade is released under the [MIT License](LICENSE). © 2026 Versa Computer.
