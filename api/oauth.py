@@ -98,8 +98,7 @@ class TastytradeOAuth:
                 continue
             except requests.RequestException as exc:
                 log.warning(
-                    "OAuth token exchange ✗ network error | %s | %s: %s",
-                    url,
+                    "OAuth token exchange ✗ network error | %s: %s",
                     type(exc).__name__,
                     str(exc),
                 )
