@@ -85,6 +85,7 @@ def main(page: ft.Page) -> None:
     client_ref: list = []  # Mutable container for authenticated client
 
     def on_login_success(c) -> None:
+        """Store the authenticated client and navigate to the dashboard."""
         client_ref.append(c)
         page.views.clear()
         page.views.append(build_dashboard_view(c, page))
@@ -92,6 +93,7 @@ def main(page: ft.Page) -> None:
         page.update()
 
     def on_login_error(msg: str) -> None:
+        """Display a transient error snack-bar and surface the message to the user."""
         page.snack_bar = ft.SnackBar(
             content=ft.Text(msg),
             bgcolor=ft.Colors.ERROR_CONTAINER,
@@ -100,6 +102,12 @@ def main(page: ft.Page) -> None:
         page.update()
 
     def route_change(e: ft.RouteChangeEvent) -> None:
+        """
+        Rebuild the view stack whenever the active route changes.
+
+        Clears existing views and appends the view that matches the current
+        route.  Unauthenticated access to protected routes redirects to ``/``.
+        """
         troute = ft.TemplateRoute(page.route or "/")
         page.views.clear()
         if troute.match("/"):
@@ -139,6 +147,7 @@ def main(page: ft.Page) -> None:
         page.update()
 
     def view_pop(e: ft.ViewPopEvent) -> None:
+        """Remove the top view and navigate back to the view below it."""
         page.views.pop()
         top = page.views[-1]
         asyncio.create_task(page.push_route(top.route))

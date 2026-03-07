@@ -32,6 +32,7 @@ def build_chart_view(client, page: ft.Page) -> ft.View:
     selected_timeframe_index = 0
 
     def _parse_quote(raw, symbol: str) -> float | None:
+        """Extract the last-traded price for *symbol* from a raw API quote response."""
         if isinstance(raw, dict) and symbol in raw:
             v = raw[symbol]
             if isinstance(v, dict):
@@ -104,6 +105,7 @@ def build_chart_view(client, page: ft.Page) -> ft.View:
         )
 
     def fetch_and_update() -> None:
+        """Fetch the latest quote for the current symbol and refresh the chart display."""
         nonlocal price_history
         sym = (symbol_field.value or "").strip().upper()
         if not sym:
@@ -132,6 +134,7 @@ def build_chart_view(client, page: ft.Page) -> ft.View:
     polling_stop = asyncio.Event()
 
     async def poll_loop() -> None:
+        """Repeatedly fetch new quotes at the active timeframe interval until stopped."""
         while not polling_stop.is_set():
             interval = TIMEFRAMES[selected_timeframe_index][1]
             try:
@@ -143,6 +146,7 @@ def build_chart_view(client, page: ft.Page) -> ft.View:
             fetch_and_update()
 
     def on_search(_) -> None:
+        """Handle a symbol search: normalise input, fetch data, and restart polling."""
         nonlocal polling_task
         sym = (symbol_field.value or "").strip().upper()
         if not sym:
@@ -159,6 +163,7 @@ def build_chart_view(client, page: ft.Page) -> ft.View:
     timeframe_container_ref = ft.Ref[ft.Container]()
 
     def build_timeframe_buttons():
+        """Build a row of timeframe selector buttons, highlighting the active one."""
         return ft.Row(
             [
                 ft.FilledButton(
@@ -177,6 +182,7 @@ def build_chart_view(client, page: ft.Page) -> ft.View:
         )
 
     def on_timeframe_click(idx: int):
+        """Select a new timeframe by index and refresh the timeframe button row."""
         nonlocal selected_timeframe_index
         selected_timeframe_index = idx
         if timeframe_container_ref.current:

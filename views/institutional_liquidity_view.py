@@ -49,6 +49,14 @@ from dataclasses import dataclass as _dc
 
 @_dc(frozen=True)
 class FuturesInstrument:
+    """Immutable descriptor for a supported futures instrument.
+
+    Attributes:
+        symbol: Canonical code (upper-case, no leading slash), e.g. ``"MES"``.
+        desc:   Human-readable full name, e.g. ``"Micro E-mini S&P 500"``.
+        base:   Approximate current price used for demo-mode candle generation.
+        sector: Instrument category, e.g. ``"Equity Index"`` or ``"Metals"``.
+    """
     symbol: str
     desc:   str
     base:   float
@@ -56,6 +64,7 @@ class FuturesInstrument:
 
 
 def _reg(*args) -> tuple[str, "FuturesInstrument"]:
+    """Construct a FuturesInstrument from positional args and return (symbol, inst)."""
     inst = FuturesInstrument(*args)
     return inst.symbol, inst
 
@@ -207,6 +216,7 @@ COL_RANGE      = "#1A4040"   # range band curve colour
 # ── Data classes ───────────────────────────────────────────────────────────────
 @dataclass
 class Candle:
+    """One OHLCV candlestick with a Unix timestamp."""
     timestamp: float
     open: float
     high: float
@@ -216,6 +226,7 @@ class Candle:
 
 @dataclass
 class Signal:
+    """A detected institutional liquidity-grab reversal signal."""
     candle_index: int          # absolute index in the buffer list
     direction:    str          # "BULL" or "BEAR"
     level:        float        # grabbed price level
@@ -309,6 +320,7 @@ _last_flush: dict[str, float] = {}   # symbol → last flush Unix time
 
 
 def _cache_path(symbol: str) -> Path:
+    """Return the filesystem path for *symbol*'s candle JSON cache file."""
     return _CACHE_DIR / f"{symbol.upper().lstrip('/')}.json"
 
 
@@ -390,6 +402,7 @@ _TRADES_DIR = Path.home() / ".mtrade" / "cache" / "sim_trades"
 
 
 def _trades_path(symbol: str) -> Path:
+    """Return the filesystem path for *symbol*'s sim-trade JSON cache file."""
     return _TRADES_DIR / f"{symbol.upper().lstrip('/')}.json"
 
 
@@ -436,6 +449,7 @@ def _save_sim_trades(symbol: str, trades: list) -> None:
 
 # ── Demo data ──────────────────────────────────────────────────────────────────
 def _demo_base(symbol: str) -> float:
+    """Return the approximate base price for *symbol* used in demo candle generation."""
     key  = symbol.upper().lstrip("/")
     inst = FUTURES_REGISTRY.get(key)
     return inst.base if inst else 100.0
@@ -467,6 +481,7 @@ def _generate_demo_candles(symbol: str, n: int = BUFFER_MINUTES) -> list[Candle]
 
 
 def _parse_api_candles(raw: list[dict]) -> list[Candle]:
+    """Convert raw API candle dicts (various schema) to a list of Candle objects."""
     result: list[Candle] = []
     for c in raw:
         try:
@@ -566,6 +581,11 @@ def detect_key_level_signals(candles: list, kl: KeyLevels) -> list:
 
 
 def _compute_sma(candles: list[Candle], period: int) -> list[Optional[float]]:
+    """Compute a simple moving average of *period* over candle closes.
+
+    Returns a list of the same length as *candles*; the first ``period - 1``
+    values are ``None`` (insufficient history).
+    """
     closes = [c.close for c in candles]
     result: list[Optional[float]] = []
     for i in range(len(closes)):
@@ -705,6 +725,7 @@ def _compute_adx(candles: list, period: int = ADX_PERIOD) -> list:
         return result
 
     def _dx(apdm_v: float, amdm_v: float, atr_v: float) -> float:
+        """Compute a single DX value from smoothed +DM, -DM, and TR components."""
         if atr_v == 0:
             return 0.0
         pdi = apdm_v / atr_v * 100
@@ -818,6 +839,7 @@ def _compute_heavy(candles: list, key_levels: "KeyLevels") -> tuple:
 
 
 def _swing_highs(candles: list[Candle], lookback: int = SWING_LOOKBACK) -> list[tuple[int, float]]:
+    """Return ``(index, high)`` pairs for all swing-high candles in *candles*."""
     out: list[tuple[int, float]] = []
     limit = len(candles) - lookback
     for i in range(lookback, limit):
@@ -828,6 +850,7 @@ def _swing_highs(candles: list[Candle], lookback: int = SWING_LOOKBACK) -> list[
 
 
 def _swing_lows(candles: list[Candle], lookback: int = SWING_LOOKBACK) -> list[tuple[int, float]]:
+    """Return ``(index, low)`` pairs for all swing-low candles in *candles*."""
     out: list[tuple[int, float]] = []
     limit = len(candles) - lookback
     for i in range(lookback, limit):
@@ -1314,9 +1337,11 @@ def _build_chart(
         return rsi_top + (100.0 - v) / 100.0 * RSI_PANEL_H
 
     def py(price: float) -> float:
+        """Map a price value to a pixel y-coordinate within the candlestick plot area."""
         return PAD_TOP + plot_h * (mx - price) / price_range
 
     def cx(i: int) -> float:
+        """Map a candle index (within the visible slice) to the candle's centre x-coordinate."""
         return PAD_LEFT + i * candle_step + candle_step / 2
 
     # Determine macro trend from last visible close vs last visible SMA200
@@ -1607,6 +1632,7 @@ def _build_chart(
         if rsi_visible:
             # RSI line segments (colored by level)
             def _rsi_seg_color(v: float) -> str:
+                """Return the RSI line color based on overbought/oversold thresholds."""
                 if v >= 70:
                     return COL_RSI_OB
                 if v <= 30:
@@ -1844,6 +1870,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
     # ── Cache helpers ─────────────────────────────────────────────────────────
     def _state() -> SymbolState:
+        """Return (and lazily create) the SymbolState for the active symbol."""
         sym = active_symbol[0]
         if sym not in _symbol_cache:
             _symbol_cache[sym] = SymbolState()
@@ -1858,6 +1885,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
     # ── Demo banner ───────────────────────────────────────────────────────────
     def _demo_banner_widget(is_demo: bool) -> ft.Control:
+        """Return a visible amber warning banner when in demo mode, or an invisible placeholder."""
         if not is_demo:
             return ft.Container(height=0)
         return ft.Container(
@@ -2274,6 +2302,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             pass
 
     def _show_badge(text: str, color: str) -> None:
+        """Show the trading-mode badge with *text* and *color*, starting the throb animation."""
         if throb_task[0] is not None:
             throb_task[0].cancel()
         if badge_ref.current:
@@ -2287,6 +2316,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         throb_task[0] = asyncio.create_task(_throb_badge())
 
     def _hide_badge() -> None:
+        """Cancel the throb animation and hide the trading-mode badge."""
         if throb_task[0] is not None:
             throb_task[0].cancel()
             throb_task[0] = None
@@ -2309,6 +2339,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             sim_lbl_ref.current.update()
 
     def _toggle_sim() -> None:
+        """Toggle paper-trading simulation on/off and update the badge accordingly."""
         global _sim_enabled
         _sim_enabled = not _sim_enabled
         _sync_sim_ui()
@@ -2319,6 +2350,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
     # ── Live trading toggle ────────────────────────────────────────────────────
     def _sync_live_ui() -> None:
+        """Sync the live-trading button and label to the current _live_enabled state."""
         if trade_live_btn_ref.current:
             trade_live_btn_ref.current.icon = (
                 ft.Icons.SENSORS if _live_enabled else ft.Icons.SENSORS_OFF
@@ -2331,6 +2363,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             trade_live_lbl_ref.current.update()
 
     def _do_enable_live() -> None:
+        """Activate live trading, disable the sim toggle, and show the live badge."""
         global _live_enabled, _sim_enabled
         _live_enabled = True
         # Pause and lock the sim toggle
@@ -2343,6 +2376,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         _show_badge("LIVE TRADING", "#C62828")
 
     def _do_disable_live() -> None:
+        """Deactivate live trading, re-enable the sim toggle, and restore the badge state."""
         global _live_enabled
         _live_enabled = False
         # Re-enable the sim toggle
@@ -2357,6 +2391,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             _hide_badge()
 
     def _toggle_live() -> None:
+        """Toggle live trading: disable immediately if active, otherwise prompt for confirmation."""
         if _live_enabled:
             _do_disable_live()
         else:
@@ -2367,10 +2402,12 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         confirmed: list[bool] = [False]
 
         def _on_confirm(e: ft.ControlEvent) -> None:
+            """Accept the live-trading confirmation dialog."""
             confirmed[0] = True
             page.close(dlg)
 
         def _on_cancel(e: ft.ControlEvent) -> None:
+            """Dismiss the live-trading confirmation dialog without enabling."""
             page.close(dlg)
 
         dlg = ft.AlertDialog(
@@ -2432,6 +2469,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         action_close = "Sell to Close" if trade.direction == "BULL" else "Buy to Close"
 
         def _leg(action: str) -> dict:
+            """Build a single order-leg dict for the given *action* on the futures contract."""
             return {
                 "instrument-type": "Future",
                 "symbol": contract_sym,
@@ -2486,8 +2524,15 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
     # ── UI update ─────────────────────────────────────────────────────────────
     async def _update_ui() -> None:
+        """
+        Full UI refresh: run heavy indicator computation off the event loop,
+        evaluate trade logic, build the chart canvas, and update all UI widgets.
+
+        Self-deregisters as the active refresh hook when the chart ref is gone
+        (i.e., when this view is no longer mounted), preventing stale closures
+        from interfering with newly mounted views for the same symbol.
+        """
         # Self-deregister if this view is no longer mounted (chart ref is gone).
-        # Prevents an orphaned closure from stealing the hook slot from a new view.
         if chart_container_ref.current is None:
             if _ui_refresh_hook[0] is _update_ui:
                 _ui_refresh_hook[0] = None
@@ -2691,6 +2736,14 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
     # ── Stream loop (DXLink with exponential back-off → demo fallback) ───────
     async def _stream_loop() -> None:
+        """
+        Per-symbol stream lifecycle: seed from cache, connect to DXLink with exponential
+        back-off, and fall back to demo mode if all retries are exhausted.
+
+        The loop runs until the active symbol changes or the enclosing asyncio Task
+        is cancelled.  On demo fallback it ticks the price every POLL_INTERVAL seconds
+        until the symbol is switched again.
+        """
         sym   = active_symbol[0]
         state = _state()
 
@@ -2814,6 +2867,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
                     connected_at = time.time()
 
                     def on_candle(candle_dict: dict) -> None:
+                        """Forward a raw DXLink candle dict to the active symbol's processor."""
                         _process_candle_event(sym, candle_dict)
 
                     await streamer.stream_candles(
@@ -2912,6 +2966,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
     # ── Demo banner refresh helper ─────────────────────────────────────────────
     def _refresh_demo_banner() -> None:
+        """Rebuild and update the demo-mode warning banner widget."""
         state = _state()
         if demo_banner_ref.current:
             demo_banner_ref.current.content = _demo_banner_widget(state.demo_mode)
@@ -2919,6 +2974,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
     # ── Symbol switch ─────────────────────────────────────────────────────────
     def _switch_symbol(new_sym: str) -> None:
+        """Cancel the current stream, switch to *new_sym*, and launch a new stream task."""
         new_sym = new_sym.strip().upper()
         if not new_sym or new_sym == active_symbol[0]:
             return
@@ -3001,9 +3057,11 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
     # ── Gesture handlers ──────────────────────────────────────────────────────
     async def _on_pan_start(e) -> None:
+        """Reset the fractional pan accumulator at the start of a drag gesture."""
         pan_accum[0] = 0.0
 
     async def _on_pan_update(e) -> None:
+        """Translate horizontal drag pixels into candle-offset changes and redraw."""
         dx = e.local_delta.x if e.local_delta is not None else 0.0
         pan_accum[0] += -dx                  # drag left → positive → older data
         delta = int(pan_accum[0] / candle_w[0])
@@ -3015,6 +3073,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             await _redraw_chart()
 
     async def _on_scroll(e) -> None:
+        """Handle scroll events: horizontal axis for panning, vertical axis for X-zoom."""
         sdx = e.scroll_delta.x if e.scroll_delta is not None else 0.0
         sdy = e.scroll_delta.y if e.scroll_delta is not None else 0.0
         if abs(sdx) >= abs(sdy):
@@ -3033,6 +3092,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
     # ── Zoom / live-edge helpers ───────────────────────────────────────────────
     def _zoom_x(delta: int) -> None:
+        """Adjust the horizontal candle width by *delta* pixels and redraw."""
         candle_w[0] = max(3, min(30, candle_w[0] + delta))
         if zoom_lbl_ref.current:
             zoom_lbl_ref.current.value = str(candle_w[0])
@@ -3040,16 +3100,19 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         asyncio.create_task(_redraw_chart())
 
     def _zoom_y(delta: int) -> None:
+        """Adjust the price-axis scale by a fixed factor and redraw the chart."""
         price_scale[0] = (min(8.0, price_scale[0] * 1.3)
                           if delta > 0 else max(0.2, price_scale[0] / 1.3))
         asyncio.create_task(_redraw_chart())
 
     def _jump_to_live() -> None:
+        """Reset the view offset to the live edge and trigger a full UI refresh."""
         view_offset[0] = 0
         asyncio.create_task(_update_ui())
 
     # ── Chip row builder ──────────────────────────────────────────────────────
     def _build_chip_row() -> ft.Control:
+        """Build a row of symbol-picker chip buttons with the active symbol highlighted."""
         active  = active_symbol[0]
         chips: list[ft.Control] = []
         for sym in QUICK_SYMBOLS:
@@ -3456,6 +3519,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
     # ── Bootstrap: restore badge on nav-back ──────────────────────────────────
     async def _restore_badge() -> None:
+        """Re-show the trading-mode badge after a navigate-back rebuild of the view."""
         await asyncio.sleep(0)   # yield so widgets are mounted
         if _live_enabled:
             _show_badge("LIVE TRADING", "#C62828")

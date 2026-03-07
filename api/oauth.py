@@ -48,6 +48,15 @@ class TastytradeOAuth:
         client_secret: str,
         refresh_token: str,
     ) -> None:
+        """
+        Initialise the OAuth2 client.
+
+        Args:
+            base_url:      API base URL (production or sandbox), trailing slash stripped.
+            client_id:     OAuth application client ID.
+            client_secret: OAuth application client secret.
+            refresh_token: Long-lived refresh token obtained from the OAuth app registration.
+        """
         self.base_url = base_url.rstrip("/")
         self.client_id = client_id
         self.client_secret = client_secret

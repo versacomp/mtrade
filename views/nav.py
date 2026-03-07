@@ -51,6 +51,8 @@ def nav_app_bar(
 
     # ── Connection status dot ──────────────────────────────────────────────────
     def _refresh(state: cs.ConnState, detail: str) -> None:
+        """Update the status dot and label when connection state changes."""
+        color = cs.COLORS[state]
         if dot_ref.current:
             dot_ref.current.bgcolor = cs.COLORS[state]
             dot_ref.current.tooltip = f"{state.value} — {detail}"
@@ -61,6 +63,11 @@ def nav_app_bar(
 
     # ── Theme toggle ───────────────────────────────────────────────────────────
     def _theme_icon() -> str:
+        """Return the icon for the theme toggle button.
+
+        Returns a sun icon when the current theme is dark (clicking will switch to light),
+        and a moon icon when the current theme is light (clicking will switch to dark).
+        """
         return (
             ft.Icons.LIGHT_MODE
             if page.theme_mode == ft.ThemeMode.DARK
@@ -68,6 +75,7 @@ def nav_app_bar(
         )
 
     def _toggle_theme(_: ft.ControlEvent) -> None:
+        """Switch between dark and light theme and persist the choice to preferences."""
         page.theme_mode = (
             ft.ThemeMode.LIGHT
             if page.theme_mode == ft.ThemeMode.DARK
@@ -85,6 +93,7 @@ def nav_app_bar(
         is_active = current_route == route
 
         async def _navigate(e: ft.ControlEvent, _route: str = route) -> None:
+            """Push *_route* onto the page navigation stack."""
             await page.push_route(_route)
 
         nav_buttons.append(
