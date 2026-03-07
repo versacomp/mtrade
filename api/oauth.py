@@ -78,7 +78,7 @@ class TastytradeOAuth:
         ]
 
         for url, payload in endpoints_to_try:
-            log.debug("OAuth token exchange → POST %s", url)
+            log.debug("OAuth token exchange → POST request")
             try:
                 response = requests.post(
                     url,
@@ -86,7 +86,7 @@ class TastytradeOAuth:
                     headers={"Content-Type": "application/json"},
                     timeout=30,
                 )
-                log.debug("OAuth token exchange ← %s %s | %s", response.status_code, response.reason, url)
+                log.debug("OAuth token exchange ← %s %s", response.status_code, response.reason)
                 response.raise_for_status()
                 data = response.json()
                 token = self._parse_token_response(data)
@@ -94,10 +94,10 @@ class TastytradeOAuth:
                 return token
             except requests.HTTPError as exc:
                 body = exc.response.text[:300] if exc.response is not None else ""
-                log.warning("OAuth token exchange ✗ %s | %s | %s", exc.response.status_code, url, body)
+                log.warning("OAuth token exchange ✗ %s | %s", exc.response.status_code, body)
                 continue
             except requests.RequestException as exc:
-                log.warning("OAuth token exchange ✗ network error | %s | %s", url, exc)
+                log.warning("OAuth token exchange ✗ network error | %s", exc)
                 continue
 
         log.error("OAuth token exchange — all endpoints failed. Check credentials and base URL.")
