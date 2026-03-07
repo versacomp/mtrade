@@ -62,15 +62,17 @@ class TastytradeOAuth:
         with OAuth params if needed.
         """
         # Try OAuth2 standard endpoint first
+        token_url = f"{self.base_url}/oauth/token"
+        session_url = f"{self.base_url}/sessions"
         endpoints_to_try = [
-            (f"{self.base_url}/oauth/token", {
+            (token_url, {
                 "grant_type": "refresh_token",
                 "refresh_token": self.refresh_token,
                 "client_id": self.client_id,
                 "client_secret": self.client_secret,
             }),
             # tastytrade may use /sessions with refresh_token
-            (f"{self.base_url}/sessions", {
+            (session_url, {
                 "refresh_token": self.refresh_token,
                 "client_id": self.client_id,
                 "client_secret": self.client_secret,
@@ -78,7 +80,7 @@ class TastytradeOAuth:
         ]
 
         for url, payload in endpoints_to_try:
-            log.debug("OAuth token exchange → POST %s", url)
+            log.debug("OAuth token exchange → POST request")
             try:
                 response = requests.post(
                     url,
@@ -86,22 +88,19 @@ class TastytradeOAuth:
                     headers={"Content-Type": "application/json"},
                     timeout=30,
                 )
-                log.debug("OAuth token exchange ← %s %s | %s", response.status_code, response.reason, url)
+                log.debug("OAuth token exchange ← %s %s", response.status_code, response.reason)
                 response.raise_for_status()
                 data = response.json()
                 token = self._parse_token_response(data)
                 log.info("OAuth token exchange OK — user=%s", token.user.get("username", "?"))
                 return token
             except requests.HTTPError as exc:
-                body = exc.response.text[:300] if exc.response is not None else ""
-                log.warning("OAuth token exchange ✗ %s | %s | %s", exc.response.status_code, url, body)
+                status = exc.response.status_code if exc.response is not None else "unknown"
+                reason = exc.response.reason if exc.response is not None else ""
+                log.warning("OAuth token exchange ✗ %s %s", status, reason)
                 continue
             except requests.RequestException as exc:
-                log.warning(
-                    "OAuth token exchange ✗ network error | %s: %s",
-                    type(exc).__name__,
-                    str(exc),
-                )
+                log.warning("OAuth token exchange ✗ network error | %s",exc)
                 continue
 
         log.error("OAuth token exchange — all endpoints failed. Check credentials and base URL.")
