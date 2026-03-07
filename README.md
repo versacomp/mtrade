@@ -6,6 +6,7 @@ A trading analysis tool that connects to the tastytrade REST API and DXLink real
 ![Version](https://img.shields.io/badge/version-0.0.1-informational)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
+[![Unit Tests](https://github.com/versacomp/mtrade/workflows/Unit%20Tests/badge.svg)](https://github.com/versacomp/mtrade/actions/workflows/unit-tests.yml)
 
 ---
 
