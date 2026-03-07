@@ -24,6 +24,8 @@ import flet as ft
 import flet.canvas as cv
 
 import api.connection_status as cs
+import config
+from api.candle_db import get_db
 from api.dxlink_streamer import DXLinkStreamer
 from views.nav import nav_app_bar
 
@@ -172,6 +174,14 @@ TRAIL_OFFSET  = 0.50   # trailing SL sits risk × TRAIL_OFFSET below/above the p
 RECONNECT_BASE_DELAY = 5    # seconds before the first retry
 RECONNECT_MAX_DELAY  = 60   # ceiling on back-off delay
 RECONNECT_MAX_TRIES  = 10   # attempts before giving up and switching to demo
+
+# Candle interval → seconds (used to compute history request window)
+INTERVAL_SECONDS: dict[str, int] = {
+    "1s": 1, "5s": 5, "15s": 15, "30s": 30,
+    "1m": 60, "3m": 180, "5m": 300,
+    "15m": 900, "30m": 1800,
+    "1h": 3600, "4h": 14400, "1d": 86400,
+}
 
 # RSI sub-panel
 RSI_PERIOD  = 14
@@ -1762,6 +1772,10 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
     # ── Active symbol ─────────────────────────────────────────────────────────
     active_symbol: list[str] = [DEFAULT_SYMBOL]
 
+    # ── Streaming preferences (read from prefs at view-build time) ────────────
+    _candle_interval: list[str]  = [config.get_pref("candle_interval", "1m")]
+    _db_record:       list[bool] = [bool(config.get_pref("candle_db_enabled", False))]
+
     # ── Stream task reference (cancel to stop/switch) ─────────────────────────
     stream_task: list = [None]  # list[asyncio.Task | None]
 
@@ -2575,7 +2589,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
             ts   = datetime.fromtimestamp(candles[-1].timestamp).strftime("%H:%M")
             status_ref.current.value = (
                 f"{sym}  ·  {mode}  ·  {len(candles)} candles  ·  last {ts}  ·  "
-                f"4h buffer  ·  1m"
+                f"4h buffer  ·  {_candle_interval[0]}"
             )
             status_ref.current.update()
 
@@ -2648,12 +2662,19 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
         candle = Candle(timestamp=t, open=o, high=h, low=l, close=c)
 
-        # Update existing candle for the same minute, or append new one
+        # Update existing candle for the same period, or append new one
         if state.buffer and abs(state.buffer[-1].timestamp - t) < 1.0:
-            state.buffer[-1] = candle   # same-minute update
+            state.buffer[-1] = candle   # same-period update
         elif not state.buffer or t > state.buffer[-1].timestamp:
             state.buffer.append(candle)
         # else: older historical candle already in buffer — skip
+
+        # Persist to SQLite if recording is enabled
+        if _db_record[0]:
+            try:
+                get_db().insert(sym, _candle_interval[0], candle_dict)
+            except Exception as _db_exc:
+                log.debug("CandleDB insert skipped: %s", _db_exc)
 
         # Throttle UI redraws to ≤2 per second during history replay
         now = time.time()
@@ -2737,11 +2758,15 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
                             f"Missing token/URL in quote token response: {token_data}"
                         )
 
-                    # Gap-fill: request only candles newer than our last buffered one
+                    # Gap-fill: request only candles newer than our last buffered one.
+                    # Fall back to BUFFER_MINUTES * interval_secs of history.
                     if state.buffer:
                         from_time_ms = int(state.buffer[-1].timestamp * 1000) + 1
                     else:
-                        from_time_ms = int((time.time() - BUFFER_MINUTES * 60) * 1000)
+                        _iv_secs = INTERVAL_SECONDS.get(_candle_interval[0], 60)
+                        from_time_ms = int(
+                            (time.time() - BUFFER_MINUTES * _iv_secs) * 1000
+                        )
 
                     streamer = DXLinkStreamer(dxlink_url, token)
                     cs.set_status(cs.ConnState.LIVE, f"{sym} — DXLink streaming")
@@ -2754,6 +2779,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
                         symbol=streamer_sym,
                         from_time_ms=from_time_ms,
                         on_candle=on_candle,
+                        interval=_candle_interval[0],
                     )
 
                     # stream_candles returned normally — connection dropped
@@ -2885,7 +2911,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
 
         # Update symbol label and description in header
         if symbol_label_ref.current:
-            symbol_label_ref.current.value = f"{new_sym}  /  1m"
+            symbol_label_ref.current.value = f"{new_sym}  /  {_candle_interval[0]}"
             symbol_label_ref.current.update()
         if desc_ref.current:
             desc_ref.current.value = _symbol_desc(new_sym)
@@ -3063,7 +3089,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
     mode_txt   = "Demo" if _state().demo_mode else "Live"
     status_txt = (
         f"{DEFAULT_SYMBOL}  ·  {mode_txt}  ·  {len(candles_init)} candles  ·  "
-        f"4h buffer  ·  1m"
+        f"4h buffer  ·  {_candle_interval[0]}"
     )
 
     # ── Layout ────────────────────────────────────────────────────────────────
@@ -3240,7 +3266,7 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
                         [
                             ft.Text(
                                 ref=symbol_label_ref,
-                                value=f"{DEFAULT_SYMBOL}  /  1m",
+                                value=f"{DEFAULT_SYMBOL}  /  {_candle_interval[0]}",
                                 size=13,
                                 color=COL_LABEL,
                                 weight=ft.FontWeight.W_500,

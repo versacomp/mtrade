@@ -13,6 +13,7 @@ _NAV_ITEMS: list[tuple[str, str]] = [
     ("Chart",     "/chart"),
     ("Liquidity", "/liquidity"),
     ("Analysis",  "/analysis"),
+    ("Settings",  "/settings"),
 ]
 
 # AppBar always uses this colour so white text is visible in both themes.

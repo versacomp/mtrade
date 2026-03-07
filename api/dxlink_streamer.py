@@ -48,9 +48,14 @@ class DXLinkStreamer:
         symbol: str,
         from_time_ms: int,
         on_candle,  # Callable[[dict], None]
+        interval: str = "1m",
     ) -> None:
         """
-        Connect, authenticate, and stream {symbol}{=1m} candle events.
+        Connect, authenticate, and stream candle events for *symbol* at *interval*.
+
+        *interval* follows the dxFeed aggregation-period syntax:
+          ``1s`` ``5s`` ``15s`` ``30s`` ``1m`` ``3m`` ``5m`` ``15m`` ``30m``
+          ``1h`` ``4h`` ``1d``  (default: ``1m``)
 
         Calls on_candle(dict) for every candle received.  The dict contains
         keys matching the fields negotiated in FEED_SETUP (eventSymbol, time,
@@ -60,8 +65,8 @@ class DXLinkStreamer:
         drops (raises ConnectionError in that case so the caller can fall back).
         """
         # symbol should already be the full streamer-symbol (e.g. /MESU26:XCME)
-        # Append the 1-minute candle aggregation suffix
-        dxlink_symbol = f"{symbol}{{=1m}}"
+        # Append the candle aggregation period suffix requested by the caller
+        dxlink_symbol = f"{symbol}{{={interval}}}"
         log.info("DXLink connecting — symbol=%s url=%s", dxlink_symbol, self.dxlink_url)
 
         field_order: list[str] = []
