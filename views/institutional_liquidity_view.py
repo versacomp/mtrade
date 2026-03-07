@@ -27,6 +27,7 @@ import api.connection_status as cs
 import config
 from api.candle_db import get_db
 from api.dxlink_streamer import DXLinkStreamer
+from api.market_hours import is_market_open, market_status, seconds_until_open
 from views.nav import nav_app_bar
 
 log = logging.getLogger(__name__)
@@ -2741,7 +2742,47 @@ def build_institutional_liquidity_view(client, page: ft.Page) -> ft.View:
         connected_at: float = 0.0   # wall time when the stream last went LIVE
 
         if streamer_sym is not None:
+            _market_closed_demo: bool = False  # True = demo solely due to closed market
+
             while sym == active_symbol[0]:
+                # ── Market-hours gate ────────────────────────────────────────
+                # When CME Globex is closed skip DXLink entirely and run demo.
+                # The gate re-checks every 30 s; once open, DXLink is attempted.
+                if not is_market_open():
+                    if not _market_closed_demo:
+                        _market_closed_demo = True
+                        state.demo_mode = True
+                        _refresh_demo_banner()
+                        if not state.buffer:
+                            cached = _load_cache(sym)
+                            if cached:
+                                for c in cached:
+                                    state.buffer.append(c)
+                            else:
+                                for c in _generate_demo_candles(sym):
+                                    state.buffer.append(c)
+                            _now = time.time()
+                            state.min_start = _now - (_now % 60)
+                        hook = _ui_refresh_hook[0]
+                        if hook is not None:
+                            asyncio.create_task(hook())
+                        log.info("Market closed — %s running demo until open", sym)
+                    _, _mst = market_status()
+                    cs.set_status(cs.ConnState.DEMO, f"{sym} — {_mst}")
+                    attempt = 0  # preserve full retries for when market reopens
+                    try:
+                        await asyncio.sleep(30.0)
+                    except asyncio.CancelledError:
+                        raise
+                    continue
+
+                # Market is open — exit closed-market demo if we were in one
+                if _market_closed_demo:
+                    _market_closed_demo = False
+                    state.demo_mode = False
+                    _refresh_demo_banner()
+                    log.info("Market opened — %s switching to live stream", sym)
+
                 stream_exc:    Optional[Exception] = None
                 auth_rejected: bool                = False
 
