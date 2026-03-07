@@ -95,11 +95,12 @@ class TastytradeOAuth:
                 log.info("OAuth token exchange OK — user=%s", token.user.get("username", "?"))
                 return token
             except requests.HTTPError as exc:
-                body = exc.response.text[:300] if exc.response is not None else ""
-                log.warning("OAuth token exchange ✗ %s | %s", exc.response.status_code, body)
+                status = exc.response.status_code if exc.response is not None else "unknown"
+                reason = exc.response.reason if exc.response is not None else ""
+                log.warning("OAuth token exchange ✗ %s %s", status, reason)
                 continue
             except requests.RequestException as exc:
-                log.warning("OAuth token exchange ✗ network error | %s", exc)
+                log.warning("OAuth token exchange ✗ network error | %s",exc)
                 continue
 
         log.error("OAuth token exchange — all endpoints failed. Check credentials and base URL.")
