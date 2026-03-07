@@ -20,12 +20,15 @@ def build_login_view(on_success, on_error) -> ft.View:
     error_text = ft.Text("", color=ft.Colors.ERROR, visible=False)
 
     def _env_color() -> str:
+        """Return the hex color for the current environment indicator badge."""
         return _COL_SANDBOX if config.is_sandbox() else _COL_PRODUCTION
 
     def _env_label() -> str:
+        """Return the human-readable label for the active environment."""
         return "SANDBOX" if config.is_sandbox() else "PRODUCTION"
 
     def _on_env_toggle(e: ft.ControlEvent) -> None:
+        """Handle the environment toggle switch; update the badge label and colour."""
         config.set_sandbox(e.control.value)
         if env_label_ref.current:
             env_label_ref.current.value = _env_label()
@@ -35,15 +38,18 @@ def build_login_view(on_success, on_error) -> ft.View:
             env_badge_ref.current.update()
 
     def show_error(msg: str) -> None:
+        """Render an inline error message beneath the login form."""
         error_text.value = msg
         error_text.visible = True
         error_text.update()
 
     def report_error(msg: str) -> None:
+        """Show the inline error and also propagate it to the on_error callback."""
         show_error(msg)
         on_error(msg)
 
     def use_oauth(e: ft.ControlEvent) -> None:
+        """Attempt OAuth login using credentials from the active environment's .env keys."""
         client_id, client_secret, refresh_token = config.get_oauth_credentials()
         if not all([client_id, client_secret, refresh_token]):
             suffix = "_SANDBOX" if config.is_sandbox() else ""
@@ -70,6 +76,7 @@ def build_login_view(on_success, on_error) -> ft.View:
             report_error(str(ex))
 
     def do_password_login(e: ft.ControlEvent) -> None:
+        """Validate the form and perform username/password authentication."""
         login_val = login_field.value
         pwd_val   = password_field.value
         if not login_val or not pwd_val:

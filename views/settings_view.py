@@ -51,6 +51,7 @@ def build_settings_view(client, page: ft.Page) -> ft.View:
 
     # ── Helpers ────────────────────────────────────────────────────────────────
     def _snack(msg: str, color: str = _COL_OK) -> None:
+        """Show a transient snack-bar notification with the given message and color."""
         page.snack_bar = ft.SnackBar(
             content=ft.Text(msg, color=ft.Colors.WHITE),
             bgcolor=color,
@@ -138,12 +139,14 @@ def build_settings_view(client, page: ft.Page) -> ft.View:
         return controls
 
     def _refresh_db(_=None) -> None:
+        """Rebuild and refresh the DB stats section of the settings view."""
         if db_section_ref.current:
             db_section_ref.current.controls = _build_db_stats()
             db_section_ref.current.update()
 
     # ── Card builder ───────────────────────────────────────────────────────────
     def _card(title: str, controls: list[ft.Control]) -> ft.Container:
+        """Wrap *controls* in a styled dark card with an amber section *title*."""
         return ft.Container(
             content=ft.Column(
                 [
@@ -160,6 +163,7 @@ def build_settings_view(client, page: ft.Page) -> ft.View:
 
     # ── Streaming card ─────────────────────────────────────────────────────────
     def _save_interval(_: ft.ControlEvent) -> None:
+        """Persist the selected candle interval preference and notify the user."""
         val = interval_dd_ref.current.value
         if val:
             config.set_pref("candle_interval", val)
@@ -201,11 +205,13 @@ def build_settings_view(client, page: ft.Page) -> ft.View:
 
     # ── Database card ──────────────────────────────────────────────────────────
     def _toggle_db(e: ft.ControlEvent) -> None:
+        """Enable or disable candle-to-database recording and refresh stats."""
         config.set_pref("candle_db_enabled", e.control.value)
         _snack(f"DB recording {'enabled' if e.control.value else 'disabled'}.")
         _refresh_db()
 
     def _save_path(_: ft.ControlEvent) -> None:
+        """Persist a new SQLite database path and force the singleton to re-open it."""
         raw = db_path_ref.current.value.strip()
         config.set_pref("candle_db_path", raw)
         reset_db()  # force singleton re-open at new path on next use

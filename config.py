@@ -38,6 +38,7 @@ def set_sandbox(sandbox: bool) -> None:
 
 
 def is_sandbox() -> bool:
+    """Return True when the sandbox environment is active, False for production."""
     return _use_sandbox
 
 
@@ -54,6 +55,7 @@ _PREFS_PATH = Path.home() / ".mtrade" / "preferences.json"
 
 
 def _load_prefs() -> dict:
+    """Load user preferences from the JSON file; return an empty dict on any error."""
     try:
         return _json.loads(_PREFS_PATH.read_text(encoding="utf-8"))
     except Exception:
@@ -61,6 +63,7 @@ def _load_prefs() -> dict:
 
 
 def _save_prefs(prefs: dict) -> None:
+    """Persist the preferences dict to disk; silently ignore write errors."""
     try:
         _PREFS_PATH.parent.mkdir(parents=True, exist_ok=True)
         _PREFS_PATH.write_text(_json.dumps(prefs, indent=2), encoding="utf-8")
@@ -69,10 +72,12 @@ def _save_prefs(prefs: dict) -> None:
 
 
 def get_pref(key: str, default=None):
+    """Retrieve a single preference value by *key*, returning *default* if absent."""
     return _load_prefs().get(key, default)
 
 
 def set_pref(key: str, value) -> None:
+    """Write a single preference *key*/*value* pair and persist the updated dict."""
     prefs = _load_prefs()
     prefs[key] = value
     _save_prefs(prefs)
