@@ -345,6 +345,10 @@ Please read our [Code of Conduct](CODE_OF_CONDUCT.md) before participating. Secu
 
 ---
 
+## Screenshots
+<img width="1396" height="930" alt="image" src="https://github.com/user-attachments/assets/63bb8df5-60b9-4d6d-a454-5b5e0f9a89d9" />
+
+
 ## License
 
 MTrade is released under the [MIT License](LICENSE). © 2026 Versa Computer.
