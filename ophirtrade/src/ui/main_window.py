@@ -6,6 +6,7 @@ from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QFont
 from ui.editor import OphirCodeEditor
 from ui.chart import OphirTradeChart
+from engine.worker import OphirExecutionEngine
 
 class OphirTradeIDE(QMainWindow):
     def __init__(self):
@@ -115,11 +116,27 @@ class OphirTradeIDE(QMainWindow):
     # --- The Action Slots (Where the magic will happen) ---
 
     def action_run_backtest(self):
-        script_content = self.editor.get_text()
-        self.terminal.append("\n[ENGINE] Compiling Ophir-AI Citadel Protocol...")
-        self.terminal.append(f"[DEBUG] Script Loaded ({len(script_content)} chars)")
-        self.terminal.append("[ENGINE] Fetching historical /NQ data...")
-        self.terminal.append("[ENGINE] Backtest initiated. Rendering PnL curve...")
+        # 1. Prevent the user from spamming the button and launching 50 threads
+        if hasattr(self, 'engine_thread') and self.engine_thread.isRunning():
+            self.terminal.append("[WARN] Engine is already running a backtest!")
+            return
+
+        self.terminal.append("\n" + "=" * 40)
+        self.terminal.append("[SYSTEM] Initiating Background Execution...")
+
+        # 2. Grab the raw text from the QScintilla code editor
+        raw_code = self.editor.text()
+
+        # 3. Instantiate the background thread
+        self.engine_thread = OphirExecutionEngine(raw_code)
+
+        # 4. Connect the thread's signals to our UI slots
+        self.engine_thread.log_signal.connect(self.append_log)
+        self.engine_thread.error_signal.connect(self.append_error)
+        self.engine_thread.finished_signal.connect(self.on_execution_finished)
+
+        # 5. Ignite the thread
+        self.engine_thread.start()
 
     def action_deploy_live(self):
         self.terminal.append("\n[WARNING] Waking Live Citadel Agent!")
@@ -130,4 +147,14 @@ class OphirTradeIDE(QMainWindow):
         self.terminal.append("\n[KILL SWITCH] 🛑 EXECUTION HALTED.")
         self.terminal.append("[SYSTEM] Flattening all open positions.")
         self.terminal.append("[SYSTEM] Disconnected from brokerage.")
-        
+
+    def append_log(self, text):
+        self.terminal.append(f"> {text}")
+
+    def append_error(self, text):
+        # Print errors in red
+        self.terminal.append(f"<span style='color: #f23645;'>{text}</span>")
+
+    def on_execution_finished(self):
+        self.terminal.append("[SYSTEM] Background execution terminated gracefully.")
+        self.terminal.append("=" * 40 + "\n")
