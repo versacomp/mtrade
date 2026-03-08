@@ -2,6 +2,7 @@ import sys
 import traceback
 import pandas as pd
 import numpy as np
+from datetime import datetime
 from PyQt6.QtCore import QThread, pyqtSignal
 
 
@@ -21,8 +22,8 @@ class OphirExecutionEngine(QThread):
     log_signal = pyqtSignal(str)
     error_signal = pyqtSignal(str)
     finished_signal = pyqtSignal()
-
     data_ready_signal = pyqtSignal(object)
+    order_signal = pyqtSignal(dict)
 
     def __init__(self, code_string):
         super().__init__()
@@ -49,23 +50,33 @@ class OphirExecutionEngine(QThread):
             # Fire the data across the thread boundary to the UI ---
             self.data_ready_signal.emit(market_data)
 
-            # 2. Inject Data into the Matrix
-            # Anything placed in this dictionary becomes globally available in the user's script
-            isolated_namespace = {
-                'historical_df': market_data,  # The raw DataFrame
-                'pd': pd,  # Pre-import pandas for them
-                'np': np  # Pre-import numpy for them
-            }
+            # --- Create the mock broker API function ---
+            def execute_broker_order(symbol: str, side: str, qty: int, price: float):
+                """This function is injected into the user's environment."""
+                order = {
+                    'time': datetime.now().strftime('%H:%M:%S.%f')[:-3],
+                    'symbol': symbol,
+                    'side': side,
+                    'qty': qty,
+                    'price': price,
+                    'status': 'FILLED'  # Mocking an instant fill for the backtest
+                }
+                self.order_signal.emit(order)
+                self.log_signal.emit(f"[BROKER] Routed {side} {qty}x {symbol} @ {price}")
 
-            self.log_signal.emit(f"[ENGINE] Loaded {len(market_data)} rows into memory.")
+            # Inject Data AND the new order routing function
+            isolated_namespace = {
+                'historical_df': market_data,
+                'pd': pd,
+                'np': np,
+                'send_order': execute_broker_order  # <--- The Magic Bridge
+            }
 
             # 3. Execute the user's script
             exec(self.code_string, isolated_namespace)
 
             # 4. Look for an entry point that takes the DataFrame as an argument
             if 'execute_trade' in isolated_namespace:
-                self.log_signal.emit("[ENGINE] Firing execute_trade(historical_df)...")
-                # Pass the DataFrame directly into their function
                 isolated_namespace['execute_trade'](market_data)
             else:
                 self.log_signal.emit("[WARN] Missing 'execute_trade(df)' entry point.")

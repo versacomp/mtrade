@@ -9,6 +9,7 @@ from ui.editor import OphirCodeEditor
 from ui.chart import OphirTradeChart
 from ui.explorer import OphirFileExplorer
 from engine.worker import OphirExecutionEngine
+from ui.blotter import OphirOrderBlotter
 
 class OphirTradeIDE(QMainWindow):
     def __init__(self):
@@ -90,17 +91,25 @@ class OphirTradeIDE(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
 
     def _build_terminal(self):
-        dock = QDockWidget("Execution Logs", self)
-        dock.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea)
+        # We modify this slightly so we can tab the terminal and blotter together
+        self.terminal_dock = QDockWidget("Execution Logs", self)
+        self.terminal_dock.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea)
 
         self.terminal = QTextEdit()
-        self.terminal.setFont(QFont("Consolas", 10))
-        self.terminal.setReadOnly(True)
-        self.terminal.setStyleSheet("background-color: #0d0d0d; color: #4af626;")
-        self.terminal.append("[SYSTEM] OphirTrade Engine Initialized...")
+        # ... (Keep your terminal setup) ...
 
-        dock.setWidget(self.terminal)
-        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
+        self.terminal_dock.setWidget(self.terminal)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.terminal_dock)
+
+        # --- NEW: Build the Blotter Dock ---
+        self.blotter_dock = QDockWidget("Order Blotter", self)
+        self.blotter = OphirOrderBlotter()
+        self.blotter_dock.setWidget(self.blotter)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.blotter_dock)
+
+        # Stack them on top of each other into tabs (Very PyCharm/VS Code!)
+        self.tabifyDockWidget(self.terminal_dock, self.blotter_dock)
+        self.blotter_dock.raise_()  # Bring Blotter to the front initially
 
     def _build_top_toolbar(self):
         """Constructs the main execution toolbar at the top of the IDE."""
@@ -155,13 +164,13 @@ class OphirTradeIDE(QMainWindow):
         raw_code = self.editor.text()
         self.engine_thread = OphirExecutionEngine(raw_code)
 
-        # --- Connect the core execution signals ---
         self.engine_thread.log_signal.connect(self.append_log)
         self.engine_thread.error_signal.connect(self.append_error)
         self.engine_thread.finished_signal.connect(self.on_execution_finished)
-
-        # --- Connect the DataFrame bridge ---
         self.engine_thread.data_ready_signal.connect(self.chart_widget.set_real_data)
+
+        # --- Connect the Blotter Signal ---
+        self.engine_thread.order_signal.connect(self.blotter.add_order)
 
         self.engine_thread.start()
 

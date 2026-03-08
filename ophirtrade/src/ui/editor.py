@@ -88,7 +88,8 @@ class OphirCodeEditor(QsciScintilla):
         # 2. OphirTrade Custom Injected Variables
         # This is where the IDE feels like magic to the user.
         ophir_injections = [
-            "execute_trade(df)", "historical_df", "pd", "np", "latest_tick", "time"
+            "execute_trade(df)", "historical_df", "pd", "np", "latest_tick", "time",
+            "send_order(symbol, side, qty, price)"
         ]
 
         # 3. Common Data Science Methods
