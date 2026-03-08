@@ -22,6 +22,8 @@ class OphirExecutionEngine(QThread):
     error_signal = pyqtSignal(str)
     finished_signal = pyqtSignal()
 
+    data_ready_signal = pyqtSignal(object)
+
     def __init__(self, code_string):
         super().__init__()
         self.code_string = code_string
@@ -34,9 +36,7 @@ class OphirExecutionEngine(QThread):
             self.log_signal.emit("[ENGINE] Initializing Ophir-AI Citadel Protocol...")
             self.log_signal.emit("[DATABASE] Fetching historical /NQ tick data...")
 
-            # 1. Load the Historical Data
-            # In production, this reads your massive CSV.
-            # For now, we generate 50,000 rows of rapid OHLCV data to prove the pipeline.
+            # 1. Generate the Historical Data
             dates = pd.date_range(start='2026-01-01', periods=50000, freq='1min')
             market_data = pd.DataFrame({
                 'open': np.random.uniform(18500, 18600, 50000),
@@ -45,6 +45,9 @@ class OphirExecutionEngine(QThread):
                 'close': np.random.uniform(18500, 18600, 50000),
                 'volume': np.random.randint(100, 1000, 50000)
             }, index=dates)
+
+            # Fire the data across the thread boundary to the UI ---
+            self.data_ready_signal.emit(market_data)
 
             # 2. Inject Data into the Matrix
             # Anything placed in this dictionary becomes globally available in the user's script
@@ -56,7 +59,7 @@ class OphirExecutionEngine(QThread):
 
             self.log_signal.emit(f"[ENGINE] Loaded {len(market_data)} rows into memory.")
 
-            # 3. Execute the user's script with the injected data
+            # 3. Execute the user's script
             exec(self.code_string, isolated_namespace)
 
             # 4. Look for an entry point that takes the DataFrame as an argument

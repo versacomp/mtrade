@@ -33,8 +33,7 @@ class OphirTradeIDE(QMainWindow):
 
         # Central Code Editor
         self.editor = OphirCodeEditor()
-        self.editor.setText(
-            "# 🚢 Ophir-AI Citadel Protocol\n# Write your Alpha here...\n\ndef execute_trade():\n    pass")
+        self.editor.setText("# 🚢 Ophir-AI Citadel Protocol\n# Write your Alpha here...\n\ndef execute_trade(df):\n    pass")
         self.setCentralWidget(self.editor)
 
         # 1. Initialize the Terminal first (so the toolbar can print to it)
@@ -80,16 +79,15 @@ class OphirTradeIDE(QMainWindow):
             self.terminal.append("[WARN] No file currently selected. Create a file in the explorer first.")
 
     def _build_chart_dock(self):
-        """Snaps the pyqtgraph engine into the right side of the IDE."""
-        self.chart_dock = QDockWidget("Live Market Data (/NQ)", self)
-        self.chart_dock.setAllowedAreas(
+        dock = QDockWidget("Live Market Data (/NQ)", self)
+        dock.setAllowedAreas(
             Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.BottomDockWidgetArea)
 
-        # Instantiate the chart widget and store reference for data updates
+        # Make the chart an instance variable so we can feed it data later
         self.chart_widget = OphirTradeChart()
 
-        self.chart_dock.setWidget(self.chart_widget)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.chart_dock)
+        dock.setWidget(self.chart_widget)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
 
     def _build_terminal(self):
         dock = QDockWidget("Execution Logs", self)
@@ -147,7 +145,6 @@ class OphirTradeIDE(QMainWindow):
     # --- The Action Slots (Where the magic will happen) ---
 
     def action_run_backtest(self):
-        # 1. Prevent the user from spamming the button and launching 50 threads
         if hasattr(self, 'engine_thread') and self.engine_thread.isRunning():
             self.terminal.append("[WARN] Engine is already running a backtest!")
             return
@@ -155,18 +152,17 @@ class OphirTradeIDE(QMainWindow):
         self.terminal.append("\n" + "=" * 40)
         self.terminal.append("[SYSTEM] Initiating Background Execution...")
 
-        # 2. Grab the raw text from the QScintilla code editor
         raw_code = self.editor.text()
-
-        # 3. Instantiate the background thread
         self.engine_thread = OphirExecutionEngine(raw_code)
 
-        # 4. Connect the thread's signals to our UI slots
+        # --- Connect the core execution signals ---
         self.engine_thread.log_signal.connect(self.append_log)
         self.engine_thread.error_signal.connect(self.append_error)
         self.engine_thread.finished_signal.connect(self.on_execution_finished)
 
-        # 5. Ignite the thread
+        # --- Connect the DataFrame bridge ---
+        self.engine_thread.data_ready_signal.connect(self.chart_widget.set_real_data)
+
         self.engine_thread.start()
 
     def action_deploy_live(self):
