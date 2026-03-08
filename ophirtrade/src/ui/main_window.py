@@ -1,11 +1,13 @@
+import os
 from PyQt6.QtWidgets import (
     QMainWindow, QDockWidget, QListWidget, QTextEdit,
     QToolBar, QPushButton, QWidget, QHBoxLayout, QLabel
 )
 from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 from ui.editor import OphirCodeEditor
 from ui.chart import OphirTradeChart
+from ui.explorer import OphirFileExplorer
 from engine.worker import OphirExecutionEngine
 
 class OphirTradeIDE(QMainWindow):
@@ -13,6 +15,9 @@ class OphirTradeIDE(QMainWindow):
         super().__init__()
         self.setWindowTitle("OphirTrade - Quant Developer IDE")
         self.resize(1400, 900)
+
+        # Track the currently open file so we can save it
+        self.current_file_path = None
 
         self.setStyleSheet("""
             QMainWindow { background-color: #1e1e1e; }
@@ -38,15 +43,37 @@ class OphirTradeIDE(QMainWindow):
         # 3. Ignite the Command Center
         self._build_top_toolbar()
 
+        # Add the Save Shortcut (Ctrl+S or Cmd+S)
+        self.save_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
+        self.save_shortcut.activated.connect(self.save_current_file)
+
     def _build_market_explorer(self):
         dock = QDockWidget("Market Explorer", self)
         dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
 
-        self.file_tree = QListWidget()
-        self.file_tree.addItems(["🧠 citadel_ppo_v2.zip", "📜 mean_reversion.py", "⚙️ config.json"])
+        # Instantiate our new native file explorer
+        self.file_explorer = OphirFileExplorer(workspace_dir="./strategies")
 
-        dock.setWidget(self.file_tree)
+        # When the user double clicks a file, catch the signal and load it
+        self.file_explorer.file_loaded.connect(self.load_file_to_editor)
+
+        dock.setWidget(self.file_explorer)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
+
+    def load_file_to_editor(self, file_path, content):
+        """Triggered by the file explorer double-click."""
+        self.current_file_path = file_path
+        self.editor.setText(content)
+        self.terminal.append(f"[SYSTEM] Loaded {os.path.basename(file_path)}")
+
+    def save_current_file(self):
+        """Triggered by Ctrl+S."""
+        if self.current_file_path:
+            with open(self.current_file_path, 'w', encoding='utf-8') as f:
+                f.write(self.editor.text())
+            self.terminal.append(f"[SYSTEM] Saved {os.path.basename(self.current_file_path)}")
+        else:
+            self.terminal.append("[WARN] No file currently selected. Create a file in the explorer first.")
 
     def _build_chart_dock(self):
         """Snaps the pyqtgraph engine into the right side of the IDE."""
