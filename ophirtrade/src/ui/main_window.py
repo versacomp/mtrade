@@ -19,13 +19,17 @@ class OphirTradeIDE(QMainWindow):
         # Track the currently open file so we can save it
         self.current_file_path = None
 
+        # Apply the unified, high-contrast dark theme across the entire application
         self.setStyleSheet("""
-            QMainWindow { background-color: #1e1e1e; }
-            QDockWidget { color: #aaaaaa; font-weight: bold; }
-            QDockWidget::title { background: #2d2d30; padding: 6px; }
-            QTextEdit, QListWidget { background-color: #252526; color: #cccccc; border: none; }
-            QToolBar { background-color: #2d2d30; border: none; spacing: 10px; padding: 5px; }
-        """)
+                    QMainWindow { background-color: #16161e; } /* Match deep editor background */
+                    QDockWidget { color: #aaaaaa; font-weight: bold; }
+                    QDockWidget::title { background: #1a1a22; padding: 6px; border-bottom: 1px solid #2d2d30;}
+
+                    /* Update the terminal and explorer docks to be slightly cohesive with new tones */
+                    QTextEdit, QListWidget, QTreeView { background-color: #101014; color: #cccccc; border: none; }
+
+                    QToolBar { background-color: #1a1a22; border: none; spacing: 10px; padding: 5px; }
+                """)
 
         # Central Code Editor
         self.editor = OphirCodeEditor()
