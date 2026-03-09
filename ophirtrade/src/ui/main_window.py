@@ -711,7 +711,7 @@ class OphirTradeIDE(QMainWindow):
             }
 
             if self.live_broker:
-                response = self.live_broker.route_order(symbol, "BUY_TO_OPEN", 1)
+                response = self.live_broker.route_order(symbol, "BUY", 1)
                 self.market_position = 1
                 self.append_log(f"[RISK MGR] LONG {symbol} | Entry: {current_price:.2f} | SL: {sl:.2f} | TP: {tp:.2f}")
                 self.append_log(f"[BROKER] {response}")
@@ -734,7 +734,7 @@ class OphirTradeIDE(QMainWindow):
             }
 
             if self.live_broker:
-                response = self.live_broker.route_order(symbol, "SELL_TO_OPEN", 1)
+                response = self.live_broker.route_order(symbol, "SELL_SHORT", 1)
                 self.market_position = -1
                 self.append_log(f"[RISK MGR] SHORT {symbol} | Entry: {current_price:.2f} | SL: {sl:.2f} | TP: {tp:.2f}")
                 self.append_log(f"[BROKER] {response}")
@@ -786,8 +786,8 @@ class OphirTradeIDE(QMainWindow):
 
         # Fire closing order to the clearinghouse
         if self.live_broker:
-            # THE FIX: We must explicitly use the TO_CLOSE verbs
-            action = "SELL_TO_CLOSE" if t['direction'] == 'LONG' else "BUY_TO_CLOSE"
+            # To close a Long, we SELL. To close a Short, we BUY_TO_COVER.
+            action = "SELL" if t['direction'] == 'LONG' else "BUY_TO_COVER"
 
             response = self.live_broker.route_order(t['symbol'], action, 1)
             self.append_log(f"[BROKER FLATTEN] {response}")

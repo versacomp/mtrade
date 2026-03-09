@@ -63,20 +63,20 @@ class OphirBroker:
         from decimal import Decimal
 
         try:
-            # STRICT ACCOUNTING ACTIONS
-            if action_type == "BUY_TO_OPEN":
+            # TASTYTRADE TRANSLATION MATRIX
+            # (Tastytrade strictly forces options verbs onto equities)
+            if action_type == "BUY":  # Going Long
                 action = OrderAction.BUY_TO_OPEN
-            elif action_type == "SELL_TO_OPEN":
-                action = OrderAction.SELL_TO_OPEN
-            elif action_type == "BUY_TO_CLOSE":
-                action = OrderAction.BUY_TO_CLOSE
-            elif action_type == "SELL_TO_CLOSE":
+            elif action_type == "SELL":  # Closing a Long
                 action = OrderAction.SELL_TO_CLOSE
+            elif action_type == "SELL_SHORT":  # Going Short
+                action = OrderAction.SELL_TO_OPEN
+            elif action_type == "BUY_TO_COVER":  # Closing a Short
+                action = OrderAction.BUY_TO_CLOSE
             else:
-                # Fallbacks for backwards compatibility
-                action = OrderAction.BUY_TO_OPEN if "BUY" in action_type else OrderAction.SELL_TO_OPEN
+                action = OrderAction.BUY_TO_OPEN  # Fallback
 
-            # BUILD THE LEG LOCALLY (Bypasses the get_equity network call)
+            # BUILD THE LEG LOCALLY
             leg = Leg(
                 instrument_type=InstrumentType.EQUITY,
                 symbol=symbol,
@@ -84,9 +84,7 @@ class OphirBroker:
                 quantity=Decimal(str(qty))
             )
 
-            # ROUTE THE ORDER
             if price:
-                # Limit orders require Decimal prices
                 order = NewOrder(time_in_force=OrderTimeInForce.DAY, order_type=OrderType.LIMIT, legs=[leg],
                                  price=Decimal(str(price)))
             else:
