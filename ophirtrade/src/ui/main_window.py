@@ -27,6 +27,12 @@ class OphirTradeIDE(QMainWindow):
         self.setWindowTitle("OphirTrade - Quant Developer IDE")
         self.resize(1400, 900)
 
+        # Execution Lock: 1 = Long, -1 = Short, 0 = Flat
+        self.market_position = 0
+
+        # --- THE RISK MANAGER ---
+        self.active_trade = None  # Holds the dictionary of the live position
+
         # --- Environment State ---
         self.is_live_mode = False  # Defaults to Sandbox for safety
         self.active_symbol = "SPY"
@@ -456,6 +462,15 @@ class OphirTradeIDE(QMainWindow):
 
             # We initialize the broker purely to grab the authenticated session
             try:
+                # 1. Grab the active symbol from the UI FIRST
+                self.active_symbol = self.txt_symbol.text().strip()
+
+                if not self.active_symbol:
+                    self.append_error("[SYSTEM] Ticker symbol cannot be empty.")
+                    return
+
+                self.txt_symbol.setEnabled(False)
+
                 # Inject the dynamic UI state into the networking engines
                 self.live_broker = OphirBroker(is_live=self.is_live_mode)
 
@@ -468,9 +483,9 @@ class OphirTradeIDE(QMainWindow):
                     self.append_log(f"[WARN] Seeder failed: {history}. Engine will cold start.")
                     self.live_candles.clear()
                 else:
-                    # Inject the history directly into the engine's memory buffer
                     self.live_candles.clear()
-                    for c in history:
+                    # Cap the history injection so we don't overflow the 250-candle deque
+                    for c in history[-250:]:
                         self.live_candles.append(c)
                     self.append_log(
                         f"[SYSTEM] Seeder injected {len(self.live_candles)} historical candles. Engine ARMED.")
@@ -536,6 +551,71 @@ class OphirTradeIDE(QMainWindow):
 
                 if bid and ask:
                     mid_price = float(bid + ask) / 2.0
+
+                    # --- 1. LIVE RISK MANAGER EVALUATION ---
+                    if self.active_trade is not None:
+                        t = self.active_trade
+                        tp_dist = abs(t['tp'] - t['entry_price'])
+
+                        if t['direction'] == 'LONG':
+                            # Update Peak & Ratcheting Stop
+                            if mid_price > t['peak']: t['peak'] = mid_price
+                            progress = t['peak'] - t['entry_price']
+
+                            # Trail Stop Trigger
+                            if progress >= 0.75 * tp_dist:
+                                trail_sl = t['peak'] - (t['risk'] * 0.50)
+                                if trail_sl > t['sl']:
+                                    t['sl'] = trail_sl
+                                    t['stage'] = 2
+                            # Breakeven Trigger
+                            elif progress >= 0.50 * tp_dist and t['stage'] < 1:
+                                t['sl'] = t['entry_price']
+                                t['stage'] = 1
+
+                            # Exit Conditions
+                            if mid_price <= t['sl'] or mid_price >= t['tp']:
+                                if mid_price >= t['tp']:
+                                    status = "WIN"
+                                elif t['sl'] == t['entry_price']:
+                                    status = "SCRATCH"
+                                else:
+                                    status = "LOSS"
+
+                                pnl = t['tp'] - t['entry_price'] if status == "WIN" else t['sl'] - t['entry_price']
+                                exit_price = t['tp'] if status == "WIN" else t['sl']
+                                self._close_active_trade(exit_price, pnl, status)
+
+                        elif t['direction'] == 'SHORT':
+                            # Update Peak & Ratcheting Stop
+                            if mid_price < t['peak']: t['peak'] = mid_price
+                            progress = t['entry_price'] - t['peak']
+
+                            # Trail Stop Trigger
+                            if progress >= 0.75 * tp_dist:
+                                trail_sl = t['peak'] + (t['risk'] * 0.50)
+                                if trail_sl < t['sl']:
+                                    t['sl'] = trail_sl
+                                    t['stage'] = 2
+                            # Breakeven Trigger
+                            elif progress >= 0.50 * tp_dist and t['stage'] < 1:
+                                t['sl'] = t['entry_price']
+                                t['stage'] = 1
+
+                            # Exit Conditions
+                            if mid_price >= t['sl'] or mid_price <= t['tp']:
+                                if mid_price <= t['tp']:
+                                    status = "WIN"
+                                elif t['sl'] == t['entry_price']:
+                                    status = "SCRATCH"
+                                else:
+                                    status = "LOSS"
+
+                                pnl = t['entry_price'] - t['tp'] if status == "WIN" else t['entry_price'] - t['sl']
+                                exit_price = t['tp'] if status == "WIN" else t['sl']
+                                self._close_active_trade(exit_price, pnl, status)
+                    # ---------------------------------------
+
                     self.tick_count += 1
                     self.live_time_buffer.append(self.tick_count)
                     self.live_price_buffer.append(mid_price)
@@ -604,33 +684,60 @@ class OphirTradeIDE(QMainWindow):
                             self.lbl_ai_confidence.setStyleSheet("color: #f1fa8c; font-weight: bold; padding: 5px;")
 
     def _process_quant_action(self, action: int, symbol: str, current_price: float):
-        """Translates rule-based Alpha signals into strict directional orders."""
+        """Translates Alpha signals into strict risk-managed orders."""
 
-        # STATE CHANGE: Prime BULL Signal -> Reverse to LONG
-        if action == 1 and self.market_position <= 0:
+        # If we are already in a trade, we ignore new signals until it closes (or you can add flip logic)
+        if self.active_trade is not None:
+            return
+
+        # Grab the signal candle (the last sealed candle in the buffer)
+        signal_candle = self.live_candles[-1]
+
+        # STATE CHANGE: Prime BULL Signal -> LONG
+        if action == 1 and self.market_position == 0:
             self.append_log(f"[QUANT GHOST] Prime BULL liquidity grab detected on {symbol}. Initiating LONG sequence.")
 
-            # If we are currently short (-1), we need to buy 2 shares to flip to long (1). Otherwise, buy 1.
-            qty_to_buy = 2 if self.market_position < 0 else 1
+            # Risk Math
+            sl = signal_candle['low']  # Stop Loss at wick tip
+            risk = current_price - sl
+            if risk <= 0: return  # Degenerate candle guard
+            tp = current_price + (risk * 2.0)  # 1:2 R:R Target
+
+            # Arm the Risk Manager
+            self.active_trade = {
+                'symbol': symbol, 'direction': 'LONG', 'entry_price': current_price,
+                'sl': sl, 'tp': tp, 'risk': risk, 'stage': 0, 'peak': current_price,
+                'entry_time': time.time()
+            }
 
             if self.live_broker:
-                self.live_broker.route_order(symbol, "BUY", qty_to_buy)
-            self.market_position = 1
-            # Log the trade stats
-            self.db.insert_trade(symbol, "LONG", current_price)
+                response = self.live_broker.route_order(symbol, "BUY_TO_OPEN", 1)
+                self.market_position = 1
+                self.append_log(f"[RISK MGR] LONG {symbol} | Entry: {current_price:.2f} | SL: {sl:.2f} | TP: {tp:.2f}")
+                self.append_log(f"[BROKER] {response}")
 
-        # STATE CHANGE: Prime BEAR Signal -> Reverse to SHORT
-        elif action == 2 and self.market_position >= 0:
+        # STATE CHANGE: Prime BEAR Signal -> SHORT
+        elif action == 2 and self.market_position == 0:
             self.append_log(f"[QUANT GHOST] Prime BEAR liquidity grab detected on {symbol}. Initiating SHORT sequence.")
 
-            # If we are currently long (1), we need to sell 2 shares to flip to short (-1). Otherwise, sell 1.
-            qty_to_sell = 2 if self.market_position > 0 else 1
+            # Risk Math
+            sl = signal_candle['high']  # Stop Loss at wick tip
+            risk = sl - current_price
+            if risk <= 0: return  # Degenerate candle guard
+            tp = current_price - (risk * 2.0)  # 1:2 R:R Target
+
+            # Arm the Risk Manager
+            self.active_trade = {
+                'symbol': symbol, 'direction': 'SHORT', 'entry_price': current_price,
+                'sl': sl, 'tp': tp, 'risk': risk, 'stage': 0, 'peak': current_price,
+                'entry_time': time.time()
+            }
 
             if self.live_broker:
-                self.live_broker.route_order(symbol, "SELL", qty_to_sell)
-            self.market_position = -1
-            # Log the trade stats
-            self.db.insert_trade(symbol, "SHORT", current_price)
+                response = self.live_broker.route_order(symbol, "SELL_TO_OPEN", 1)
+                self.market_position = -1
+                self.append_log(f"[RISK MGR] SHORT {symbol} | Entry: {current_price:.2f} | SL: {sl:.2f} | TP: {tp:.2f}")
+                self.append_log(f"[BROKER] {response}")
 
     def toggle_trading_mode(self):
         """Switches the application between Sandbox and Live Production routing."""
@@ -668,3 +775,28 @@ class OphirTradeIDE(QMainWindow):
                 "padding: 5px 15px;"
             )
             self.append_log("[SYSTEM] Production Mode disarmed. System returned to Sandbox simulation.")
+
+    def _close_active_trade(self, exit_price: float, pnl: float, status: str):
+        """Flattens the position and records the financial outcome to SQLite."""
+        t = self.active_trade
+        t['exit_price'] = exit_price
+        t['pnl'] = pnl
+        t['status'] = status
+        t['exit_time'] = time.time()
+
+        # Fire closing order to the clearinghouse
+        if self.live_broker:
+            # THE FIX: We must explicitly use the TO_CLOSE verbs
+            action = "SELL_TO_CLOSE" if t['direction'] == 'LONG' else "BUY_TO_CLOSE"
+
+            response = self.live_broker.route_order(t['symbol'], action, 1)
+            self.append_log(f"[BROKER FLATTEN] {response}")
+
+        # Log to Database
+        self.db.log_closed_trade(t)
+
+        self.append_log(f"[RISK MGR] Trade Closed: {status} | P&L: {pnl:.2f} pts | Exit: {exit_price:.2f}")
+
+        # Reset state
+        self.active_trade = None
+        self.market_position = 0
