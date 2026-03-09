@@ -769,10 +769,13 @@ class OphirTradeIDE(QMainWindow):
             }
 
             if self.live_broker:
-                response = self.live_broker.route_order(symbol, "BUY", 1)
-                self.market_position = 1
-                self.append_log(f"[RISK MGR] LONG {symbol} | Entry: {current_price:.2f} | SL: {sl:.2f} | TP: {tp:.2f}")
-                self.append_log(f"[BROKER] {response}")
+                if self.paper_trade:
+                    self.append_log(f"[PAPER] Simulated BUY order locked locally. Wall Street bypassed.")
+                else:
+                    response = self.live_broker.route_order(symbol, "BUY", 1)
+                    self.market_position = 1
+                    self.append_log(f"[RISK MGR] LONG {symbol} | Entry: {current_price:.2f} | SL: {sl:.2f} | TP: {tp:.2f}")
+                    self.append_log(f"[BROKER] {response}")
 
         # STATE CHANGE: Prime BEAR Signal -> SHORT
         elif action == 2 and self.market_position == 0:
@@ -856,8 +859,11 @@ class OphirTradeIDE(QMainWindow):
             # To close a Long, we SELL. To close a Short, we BUY_TO_COVER.
             action = "SELL" if t['direction'] == 'LONG' else "BUY_TO_COVER"
 
-            response = self.live_broker.route_order(t['symbol'], action, 1)
-            self.append_log(f"[BROKER FLATTEN] {response}")
+            if self.paper_trade:
+                self.append_log(f"[PAPER FLATTEN] Simulated {action} order filled locally. Wall Street bypassed.")
+            else:
+                response = self.live_broker.route_order(t['symbol'], action, 1)
+                self.append_log(f"[BROKER FLATTEN] {response}")
 
         # Log to Database
         self.db.log_closed_trade(t)
