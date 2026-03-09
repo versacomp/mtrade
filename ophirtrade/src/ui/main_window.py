@@ -586,7 +586,11 @@ class OphirTradeIDE(QMainWindow):
                 # ---------------------------------------
 
                 # Start the background firehose, locked onto the S&P 500 ETF
-                self.streamer_thread = MarketDataStreamer(symbol=self.active_symbol, is_live=self.is_live_mode)
+                # Pass the authenticated live session directly to the data firehose
+                self.streamer_thread = MarketDataStreamer(
+                    symbol=self.active_symbol,
+                    is_live=self.is_live_mode
+                )
                 self.streamer_thread.tick_signal.connect(self.process_live_tick)
                 self.streamer_thread.error_signal.connect(self.append_error)
                 self.streamer_thread.start()
