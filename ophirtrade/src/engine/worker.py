@@ -6,6 +6,7 @@ from datetime import datetime
 from PyQt6.QtCore import QThread, pyqtSignal
 from stable_baselines3 import PPO
 from ai.env import CitadelEnv
+from engine.broker import OphirBroker
 
 class OutputRedirector:
     def __init__(self, signal):
@@ -45,6 +46,11 @@ class OphirExecutionEngine(QThread):
             self.log_signal.emit("[ENGINE] Initializing Ophir-AI Citadel Protocol...")
             self.log_signal.emit("[DATABASE] Fetching historical /NQ tick data...")
 
+            # --- Initialize the OAuth Broker Bridge ---
+            # Set to True ONLY when you are ready to risk real capital
+            broker_bridge = OphirBroker(is_live=False)
+            self.log_signal.emit("[ENGINE] Secure OAuth connection established.")
+
             # 1. Generate the Historical Data
             dates = pd.date_range(start='2026-01-01', periods=50000, freq='1min')
             market_data = pd.DataFrame({
@@ -58,19 +64,21 @@ class OphirExecutionEngine(QThread):
             # Fire the data across the thread boundary to the UI ---
             self.data_ready_signal.emit(market_data)
 
-            # --- Create the mock broker API function ---
-            def execute_broker_order(symbol: str, side: str, qty: int, price: float):
-                """This function is injected into the user's environment."""
-                order = {
-                    'time': datetime.now().strftime('%H:%M:%S.%f')[:-3],
+            def execute_live_order(symbol: str, side: str, qty: int, price: float = None):
+                """Injected function that hits the exchange via the OAuth session."""
+                self.log_signal.emit(f"[BROKER] Transmitting {side} {qty}x {symbol}...")
+                response = broker_bridge.route_order(symbol, side, qty, price)
+
+                order_log = {
+                    'time': datetime.now().strftime('%H:%M:%S'),
                     'symbol': symbol,
                     'side': side,
                     'qty': qty,
-                    'price': price,
-                    'status': 'FILLED'  # Mocking an instant fill for the backtest
+                    'price': price if price else 0.0,
+                    'status': 'ROUTED'
                 }
-                self.order_signal.emit(order)
-                self.log_signal.emit(f"[BROKER] Routed {side} {qty}x {symbol} @ {price}")
+                self.order_signal.emit(order_log)
+                self.log_signal.emit(f"[BROKER] Response: {response}")
 
             # --- Create the mock plotting API function ---
             def execute_plot(series: pd.Series, name: str = "Indicator", color: str = "#FFC66D"):
@@ -99,7 +107,7 @@ class OphirExecutionEngine(QThread):
                 'historical_df': market_data,
                 'pd': pd,
                 'np': np,
-                'send_order': execute_broker_order,  # <--- The Magic Bridge
+                'send_order': execute_live_order,  # <--- The Magic Bridge
                 'plot': execute_plot, # <--- The Magic Plotting Bridge
                 'train_ai': execute_training # <--- The Magic ML Training Bridge
             }
@@ -110,21 +118,9 @@ class OphirExecutionEngine(QThread):
             # 4. Look for an entry point that takes the DataFrame as an argument
             if 'execute_trade' in isolated_namespace:
                 isolated_namespace['execute_trade'](market_data)
-
-                # --- Generate and emit the final performance metrics ---
-                self.log_signal.emit("[ENGINE] Calculating final strategy metrics...")
-
-                # Mocking the calculation engine's output
-                final_stats = {
-                    "net_profit": 4250.50,
-                    "win_rate": 62.5,
-                    "total_trades": 14,
-                    "max_drawdown": -4.2,
-                    "profit_factor": 1.85,
-                    "sharpe_ratio": 1.4
-                }
-
-                self.stats_signal.emit(final_stats)
+                self.stats_signal.emit(
+                    {"net_profit": 0.0, "win_rate": 0.0, "total_trades": 0, "max_drawdown": 0.0, "profit_factor": 0.0,
+                     "sharpe_ratio": 0.0})
             else:
                 self.log_signal.emit("[WARN] Missing 'execute_trade(df)' entry point.")
 
