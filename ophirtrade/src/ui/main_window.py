@@ -4,7 +4,8 @@ import pandas as pd
 import torch
 from PyQt6.QtWidgets import (
     QMainWindow, QDockWidget, QListWidget, QTextEdit,
-    QToolBar, QPushButton, QWidget, QHBoxLayout, QVBoxLayout, QLabel
+    QToolBar, QPushButton, QWidget, QHBoxLayout,
+    QVBoxLayout, QLabel, QLineEdit
 )
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
@@ -26,6 +27,10 @@ class OphirTradeIDE(QMainWindow):
         super().__init__()
         self.setWindowTitle("OphirTrade - Quant Developer IDE")
         self.resize(1400, 900)
+
+        # --- Environment State ---
+        self.is_live_mode = False  # Defaults to Sandbox for safety
+        self.active_symbol = "SPY"
 
         # --- Live Data Buffers ---
         # Keep a rolling window of the last 1000 ticks to prevent memory leaks
@@ -135,15 +140,15 @@ class OphirTradeIDE(QMainWindow):
             self.terminal.append("[WARN] No file currently selected. Create a file in the explorer first.")
 
     def _build_chart_dock(self):
-        dock = QDockWidget("Live Market Data (/NQ)", self)
-        dock.setAllowedAreas(
+        self.dock_chart = QDockWidget(f"Live {self.active_symbol}", self)
+        self.dock_chart.setAllowedAreas(
             Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.BottomDockWidgetArea)
 
         # Make the chart an instance variable so we can feed it data later
         self.chart_widget = OphirTradeChart()
 
-        dock.setWidget(self.chart_widget)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        self.dock_chart.setWidget(self.chart_widget)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_chart)
 
     def _build_terminal(self):
         # We modify this slightly so we can tab the terminal and blotter together
@@ -262,6 +267,29 @@ class OphirTradeIDE(QMainWindow):
         btn_backtest.clicked.connect(self.action_run_backtest)
         toolbar.addWidget(btn_backtest)
 
+        # --- DYNAMIC SYMBOL SELECTOR ---
+        lbl_symbol = QLabel("TICKER:")
+        lbl_symbol.setStyleSheet("color: #8be9fd; font-weight: bold; font-family: Consolas;")
+        toolbar.addWidget(lbl_symbol)
+
+        # 1. CREATE THE TEXT BOX FIRST
+        self.txt_symbol = QLineEdit("SPY")  # "SPY" is the default text
+        self.txt_symbol.setFixedWidth(80)
+        self.txt_symbol.setStyleSheet(
+            "background-color: #44475a; "
+            "color: #f8f8f2; "
+            "border: 1px solid #6272a4; "
+            "padding: 5px; "
+            "font-weight: bold; "
+            "font-family: Consolas;"
+        )
+        self.txt_symbol.textChanged.connect(lambda text: self.txt_symbol.setText(text.upper()))
+        toolbar.addWidget(self.txt_symbol)
+
+        # 2. NOW SET THE VARIABLE
+        # Because self.txt_symbol exists now, we can safely read it.
+        self.active_symbol = self.txt_symbol.text().strip()
+
         # --- Live Data Toggle ---
         self.btn_live_data = QPushButton("Connect Live Data Feed")
         self.btn_live_data.setStyleSheet("background-color: #2b2b2b; color: #50fa7b; border: 1px solid #50fa7b;")
@@ -303,6 +331,18 @@ class OphirTradeIDE(QMainWindow):
         self.btn_halt.clicked.connect(self.halt_all_trading)
         toolbar.addWidget(self.btn_halt)
 
+        # --- NEW: PRODUCTION MODE TOGGLE ---
+        self.btn_mode_toggle = QPushButton("MODE: SANDBOX")
+        self.btn_mode_toggle.setStyleSheet(
+            "background-color: #ffb86c; "  # Darcula Orange
+            "color: #282a36; "
+            "font-weight: bold; "
+            "border: 2px solid #ffb86c; "
+            "padding: 5px 15px;"
+        )
+        self.btn_mode_toggle.clicked.connect(self.toggle_trading_mode)
+        toolbar.addWidget(self.btn_mode_toggle)
+
     def halt_all_trading(self):
         """The Master Kill Switch: Severs data, stops the AI, and flattens all positions."""
         self.append_log("\n[EMERGENCY] =========================================")
@@ -313,6 +353,7 @@ class OphirTradeIDE(QMainWindow):
             self.streamer_thread.stop()
             self.streamer_thread.wait()
             self.streamer_thread = None
+            self.txt_symbol.setEnabled(True)  # Unlock the text box
 
             # Reset the Live Data button UI
             self.btn_live_data.setText("Connect Live Data Feed")
@@ -325,9 +366,7 @@ class OphirTradeIDE(QMainWindow):
                 "color: #ff5555; font-weight: bold; font-family: Consolas; padding: 5px;")
 
         # 2. FLATTEN THE MARKET POSITION
-        # We hardcoded SPY for our test, so we use SPY here.
-        # In a fully dynamic system, you would track the active symbol.
-        target_symbol = "SPY"
+        target_symbol = self.active_symbol
 
         if self.market_position == 1:
             self.append_log(f"[EMERGENCY] Liquidating LONG position on {target_symbol}...")
@@ -405,6 +444,7 @@ class OphirTradeIDE(QMainWindow):
             self.btn_live_data.setText("Connect Live Data Feed")
             self.btn_live_data.setStyleSheet("background-color: #2b2b2b; color: #50fa7b; border: 1px solid #50fa7b;")
             self.append_log("[SYSTEM] Live WebSocket feed terminated.")
+            self.txt_symbol.setEnabled(True)  # Unlock the text box
         else:
             # Connect
             self.append_log("[SYSTEM] Initializing secure OAuth session for live data...")
@@ -413,12 +453,36 @@ class OphirTradeIDE(QMainWindow):
 
             # We initialize the broker purely to grab the authenticated session
             try:
-                self.live_broker = OphirBroker(is_live=False)
+                # Inject the dynamic UI state into the networking engines
+                self.live_broker = OphirBroker(is_live=self.is_live_mode)
 
                 # --- PREPARE THE CHART FOR LIVE DATA ---
                 # Clear any existing backtest candlesticks
+                # 1. Grab the active symbol from the UI
+                self.active_symbol = self.txt_symbol.text().strip()
+
+                if not self.active_symbol:
+                    self.append_error("[SYSTEM] Ticker symbol cannot be empty.")
+                    return
+
+                # 2. Lock the input box so the user can't change it mid-stream
+                self.txt_symbol.setEnabled(False)
+
+                # --- UPDATE THE UI TITLES ---
+                # Update the Dock Widget Title
+                # (Note: Change 'self.dock_chart' to whatever you actually named your chart dock variable!)
+                if hasattr(self, 'dock_chart'):
+                    self.dock_chart.setWindowTitle(f"MARKET MATRIX: {self.active_symbol}")
+
+                # Update the pyqtgraph internal title (if you want the text directly on the grid)
+                if hasattr(self.chart_widget, 'graph'):
+                    self.chart_widget.graph.setTitle(
+                        f"<span style='color: #8be9fd; font-size: 14pt;'>{self.active_symbol} Live Tape</span>")
+                # ---------------------------------
+
+                # Use your custom wrapper methods (Optional: update your create_live_line to take a name!)
                 self.chart_widget.clear_chart()
-                self.live_curve = self.chart_widget.create_live_line()
+                self.live_curve = self.chart_widget.create_live_line(name=f"Live {self.active_symbol}")
 
                 # Reset the memory buffers
                 self.live_price_buffer.clear()
@@ -427,7 +491,7 @@ class OphirTradeIDE(QMainWindow):
                 # ---------------------------------------
 
                 # Start the background firehose, locked onto the S&P 500 ETF
-                self.streamer_thread = MarketDataStreamer(symbol="SPY", is_live=False)
+                self.streamer_thread = MarketDataStreamer(symbol=self.active_symbol, is_live=self.is_live_mode)
                 self.streamer_thread.tick_signal.connect(self.process_live_tick)
                 self.streamer_thread.error_signal.connect(self.append_error)
                 self.streamer_thread.start()
@@ -565,3 +629,40 @@ class OphirTradeIDE(QMainWindow):
             if self.live_broker:
                 self.live_broker.route_order(symbol, "SELL", qty_to_sell)
             self.live_account.current_position = target_qty
+
+    def toggle_trading_mode(self):
+        """Switches the application between Sandbox and Live Production routing."""
+
+        # SAFETY INTERLOCK: Do not allow mode switching while the matrix is online
+        if self.streamer_thread and self.streamer_thread.isRunning():
+            self.append_log("[SECURITY] Cannot switch modes while the data feed is active.")
+            self.append_log("[SECURITY] Please Disconnect or HALT ALL first.")
+            return
+
+        # Flip the state
+        self.is_live_mode = not self.is_live_mode
+
+        # Update the UI
+        if self.is_live_mode:
+            self.btn_mode_toggle.setText("MODE: LIVE PRODUCTION")
+            self.btn_mode_toggle.setStyleSheet(
+                "background-color: #ff5555; "  # Darcula Red
+                "color: #ffffff; "
+                "font-weight: bold; "
+                "border: 2px solid #ff0000; "
+                "padding: 5px 15px;"
+            )
+            self.append_log("\n[WARNING] =========================================")
+            self.append_log("[WARNING] PRODUCTION MODE ARMED.")
+            self.append_log("[WARNING] Real capital is now at risk. OAuth routing shifted to Live APIs.")
+            self.append_log("[WARNING] =========================================\n")
+        else:
+            self.btn_mode_toggle.setText("MODE: SANDBOX")
+            self.btn_mode_toggle.setStyleSheet(
+                "background-color: #ffb86c; "
+                "color: #282a36; "
+                "font-weight: bold; "
+                "border: 2px solid #ffb86c; "
+                "padding: 5px 15px;"
+            )
+            self.append_log("[SYSTEM] Production Mode disarmed. System returned to Sandbox simulation.")

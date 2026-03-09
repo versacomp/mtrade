@@ -63,9 +63,9 @@ class OphirTradeChart(QWidget):
         # Change 'self.graph' to whatever your internal pyqtgraph variable is named!
         self.plot_widget.clear()
 
-    def create_live_line(self):
+    def create_live_line(self, name="Live Data"):
         """Creates and returns a neon green line for the live WebSocket feed."""
-        return self.plot_widget.plot(pen=pg.mkPen('#50fa7b', width=2), name="Live SPY")
+        return self.plot_widget.plot(pen=pg.mkPen('#50fa7b', width=2), name=name)
 
     def update_data(self, data):
         """
