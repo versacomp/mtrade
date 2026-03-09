@@ -36,9 +36,9 @@ class OphirDatabase:
                              REAL
                          )
                          ''')
-            # Table for strategy performance stats
+            # UPGRADED: Table for strategy performance stats
             conn.execute('''
-                         CREATE TABLE IF NOT EXISTS sim_trades
+                         CREATE TABLE IF NOT EXISTS closed_trades
                          (
                              symbol
                              TEXT,
@@ -46,13 +46,39 @@ class OphirDatabase:
                              TEXT,
                              entry_price
                              REAL,
-                             timestamp
+                             exit_price
+                             REAL,
+                             sl
+                             REAL,
+                             tp
+                             REAL,
+                             pnl
+                             REAL,
+                             status
+                             TEXT,
+                             entry_time
+                             REAL,
+                             exit_time
                              REAL
                          )
                          ''')
-            # Create indices for lightning-fast queries later
             conn.execute('CREATE INDEX IF NOT EXISTS idx_candle_symbol ON candles(symbol)')
-            conn.execute('CREATE INDEX IF NOT EXISTS idx_trade_symbol ON sim_trades(symbol)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_trade_symbol ON closed_trades(symbol)')
+
+    def log_closed_trade(self, trade_record: dict):
+        """Saves a fully closed trade to the local database for KPI analysis."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                '''INSERT INTO closed_trades
+                   (symbol, direction, entry_price, exit_price, sl, tp, pnl, status, entry_time, exit_time)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                (
+                    trade_record['symbol'], trade_record['direction'],
+                    trade_record['entry_price'], trade_record['exit_price'],
+                    trade_record['sl'], trade_record['tp'], trade_record['pnl'],
+                    trade_record['status'], trade_record['entry_time'], trade_record['exit_time']
+                )
+            )
 
     def insert_candle(self, symbol: str, candle: dict, timestamp: float):
         """Saves a fully closed candle to the local database."""
@@ -60,13 +86,4 @@ class OphirDatabase:
             conn.execute(
                 'INSERT INTO candles VALUES (?, ?, ?, ?, ?, ?, ?)',
                 (symbol, timestamp, candle['open'], candle['high'], candle['low'], candle['close'], candle['volume'])
-            )
-
-    def insert_trade(self, symbol: str, direction: str, entry_price: float):
-        """Logs an Alpha Engine execution for KPI tracking."""
-        timestamp = datetime.datetime.now().timestamp()
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                'INSERT INTO sim_trades VALUES (?, ?, ?, ?)',
-                (symbol, direction, entry_price, timestamp)
             )
