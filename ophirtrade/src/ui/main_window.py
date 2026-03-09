@@ -560,6 +560,25 @@ class OphirTradeIDE(QMainWindow):
                 self.chart_widget.clear_chart()
                 self.live_curve = self.chart_widget.create_live_line(name=f"Live {self.active_symbol}")
 
+                # --- NEW: VISUAL OVERLAYS ---
+                # 1. The SMA 200 Line (Golden)
+                self.sma_curve = self.chart_widget.plot_widget.plot(
+                    pen=pg.mkPen('#f1fa8c', width=2, style=Qt.PenStyle.DashLine))
+
+                # 2. Execution Markers (Scatter Plots)
+                # symbol 't1' is an Up-Arrow, 't' is a Down-Arrow
+                self.buy_scatter = pg.ScatterPlotItem(symbol='t1', size=14, brush='#50fa7b', pen='w')
+                self.sell_scatter = pg.ScatterPlotItem(symbol='t', size=14, brush='#ff5555', pen='w')
+
+                self.chart_widget.plot_widget.addItem(self.buy_scatter)
+                self.chart_widget.plot_widget.addItem(self.sell_scatter)
+
+                # Memory arrays for the markers
+                self.buy_x, self.buy_y = [], []
+                self.sell_x, self.sell_y = [], []
+                self.sma_data = []
+                # ---------------------------------------
+
                 # Reset the memory buffers
                 self.live_price_buffer.clear()
                 self.live_time_buffer.clear()
