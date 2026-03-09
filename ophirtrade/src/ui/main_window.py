@@ -1,5 +1,6 @@
 import os
-import pyqtgraph as pg
+import numpy as np
+import torch
 from PyQt6.QtWidgets import (
     QMainWindow, QDockWidget, QListWidget, QTextEdit,
     QToolBar, QPushButton, QWidget, QHBoxLayout, QLabel
@@ -15,6 +16,7 @@ from ui.dashboard import OphirPerformanceDashboard
 from engine.streamer import MarketDataStreamer
 from engine.broker import OphirBroker
 from collections import deque
+from stable_baselines3 import PPO
 
 class OphirTradeIDE(QMainWindow):
     def __init__(self):
@@ -62,6 +64,22 @@ class OphirTradeIDE(QMainWindow):
         # Add the Save Shortcut (Ctrl+S or Cmd+S)
         self.save_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
         self.save_shortcut.activated.connect(self.save_current_file)
+
+        # --- The AI Ghost Variables ---
+        try:
+            # Attempt to load the trained brain into memory
+            self.ai_model = PPO.load("citadel_ppo_v1")
+            self.append_log("[SYSTEM] AI Model 'citadel_ppo_v1' loaded and standing by.")
+        except Exception as e:
+            self.ai_model = None
+            self.append_log(f"[WARN] No compiled AI found. Running in manual mode. ({str(e)})")
+
+        # The Execution Lock (0 = Flat, 1 = Long, -1 = Short)
+        # This prevents the AI from spamming the exchange.
+        self.market_position = 0
+
+        # The Observation Window (Must match what the AI was trained on)
+        self.ai_window_size = 10
 
     def _build_market_explorer(self):
         dock = QDockWidget("Market Explorer", self)
@@ -159,6 +177,11 @@ class OphirTradeIDE(QMainWindow):
         # Keep track of the streamer state
         self.streamer_thread = None
         self.live_broker = None
+
+        # --- AI Telemetry Readout ---
+        self.lbl_ai_confidence = QLabel("AI State: Awaiting Data...")
+        self.lbl_ai_confidence.setStyleSheet("color: #8be9fd; font-weight: bold; font-family: Consolas; padding: 5px;")
+        toolbar.addWidget(self.lbl_ai_confidence)
 
         # --- Button 2: Deploy Live ---
         btn_live = QPushButton("⚡ Deploy Live")
@@ -276,7 +299,6 @@ class OphirTradeIDE(QMainWindow):
                 self.append_error(f"[NETWORK ERROR] Failed to authenticate stream: {str(e)}")
 
     def process_live_tick(self, data: dict):
-        """Catches the tick, calculates the mid-price, and updates the GPU canvas."""
         if data.get("type") == "status":
             self.append_log(data.get("msg"))
 
@@ -288,25 +310,82 @@ class OphirTradeIDE(QMainWindow):
                 ask = data.get('ask')
                 symbol = data.get('symbol')
 
-                # Validate that we actually received prices (sometimes pre-market quotes are empty)
                 if bid and ask:
-                    # 1. Cast the Decimals to floats to calculate the Mid-Price for the chart
                     mid_price = float(bid + ask) / 2.0
-
-                    # 2. Add to the rolling memory buffers
                     self.tick_count += 1
                     self.live_time_buffer.append(self.tick_count)
                     self.live_price_buffer.append(mid_price)
 
-                    # 3. Inject into the pyqtgraph GPU memory
                     if self.live_curve:
-                        # We cast the deque to a list for pyqtgraph to render
                         self.live_curve.setData(
                             x=list(self.live_time_buffer),
                             y=list(self.live_price_buffer)
                         )
 
-                    # 4. Throttle the terminal matrix text (Only print every 25th tick)
                     if self.tick_count % 25 == 0:
-                        msg = f"[LIVE MARKET] {symbol} | MID: {mid_price:.2f} | BID: {bid} ASK: {ask}"
-                        self.append_log(msg)
+                        self.append_log(f"[LIVE MARKET] {symbol} | MID: {mid_price:.2f}")
+
+                    # --- THE AI TRIGGER & TELEMETRY ---
+                    if self.ai_model and len(self.live_price_buffer) >= self.ai_window_size:
+
+                        # 1. Format the live data
+                        raw_obs = list(self.live_price_buffer)[-self.ai_window_size:]
+                        obs_array = np.array(raw_obs, dtype=np.float32).reshape(1, -1)
+
+                        # 2. Get the physical action
+                        action, _states = self.ai_model.predict(obs_array, deterministic=True)
+
+                        # 3. INTERROGATE THE NEURAL NETWORK FOR CONFIDENCE
+                        # Move the numpy array to PyTorch tensors on the correct device (CPU/GPU)
+                        obs_tensor = torch.tensor(obs_array).to(self.ai_model.device)
+
+                        # Get the probability distribution for this specific market state
+                        dist = self.ai_model.policy.get_distribution(obs_tensor)
+                        probs = dist.distribution.probs.detach().cpu().numpy()[0]
+
+                        # probs is an array like [0.15, 0.70, 0.15] corresponding to [Hold, Buy, Sell]
+                        action_names = ["HOLD", "BUY", "SELL"]
+                        selected_action_name = action_names[int(action)]
+                        confidence_percentage = probs[int(action)] * 100
+
+                        # 4. Update the UI Readout in Real-Time
+                        self.lbl_ai_confidence.setText(
+                            f"AI Matrix: {selected_action_name} ({confidence_percentage:.1f}%)")
+
+                        # Change color based on action for visual flair
+                        if int(action) == 1:
+                            self.lbl_ai_confidence.setStyleSheet(
+                                "color: #50fa7b; font-weight: bold; font-family: Consolas; padding: 5px;")  # Green for Buy
+                        elif int(action) == 2:
+                            self.lbl_ai_confidence.setStyleSheet(
+                                "color: #ff5555; font-weight: bold; font-family: Consolas; padding: 5px;")  # Red for Sell
+                        else:
+                            self.lbl_ai_confidence.setStyleSheet(
+                                "color: #8be9fd; font-weight: bold; font-family: Consolas; padding: 5px;")  # Cyan for Hold
+
+                        # 5. Route the AI's intent through the Execution Locks
+                        self._process_ai_action(int(action), symbol, mid_price)
+
+    def _process_ai_action(self, action: int, symbol: str, current_price: float):
+        """Translates neural network outputs into strictly controlled broker commands."""
+
+        if action == 1 and self.market_position == 0:
+            # AI wants to BUY and we currently hold nothing
+            self.append_log(f"[AI GHOST] Alpha signature detected on {symbol}. Initiating BUY sequence.")
+            self.market_position = 1
+
+            # Fire the physical order!
+            if self.live_broker:
+                # We use a market order here for instant execution, but a limit is safer in prod
+                response = self.live_broker.route_order(symbol=symbol, side="BUY", qty=1, price=None)
+                self.append_log(f"[BROKER] {response}")
+
+        elif action == 2 and self.market_position == 1:
+            # AI wants to SELL and we are currently holding a long position
+            self.append_log(f"[AI GHOST] Exit condition met for {symbol}. Initiating SELL sequence.")
+            self.market_position = 0
+
+            # Fire the physical order!
+            if self.live_broker:
+                response = self.live_broker.route_order(symbol=symbol, side="SELL", qty=1, price=None)
+                self.append_log(f"[BROKER] {response}")
