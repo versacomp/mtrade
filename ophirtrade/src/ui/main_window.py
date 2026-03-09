@@ -829,6 +829,11 @@ class OphirTradeIDE(QMainWindow):
         elif action == 2 and self.market_position == 0:
             self.append_log(f"[QUANT GHOST] Prime BEAR liquidity grab detected on {symbol}. Initiating SHORT sequence.")
 
+            # Paint the Sell Arrow (Red)
+            self.sell_x.append(current_time)
+            self.sell_y.append(current_price)
+            self.sell_scatter.setData(self.sell_x, self.sell_y)
+
             # Risk Math
             sl = signal_candle['high']  # Stop Loss at wick tip
             risk = sl - current_price
