@@ -106,19 +106,31 @@ class OphirBroker:
         except Exception as e:
             return f"ERROR: {str(e)}", None
 
-    def get_historical_candles(self, symbol: str, days_back: int = 3):
-        """Fetches historical 1-minute candles from Yahoo Finance to instantly seed the Alpha Engine."""
+    def get_historical_candles(self, symbol: str, interval: str = '1m'):
+        """Fetches historical candles from Yahoo Finance with dynamic lookback."""
         try:
             import yfinance as yf
             import pandas as pd
 
-            # Download the 1-minute tape for the last 3 days
-            df = yf.download(symbol, period=f"{days_back}d", interval='1m', progress=False)
+            # Dynamic Lookback: Ensure we always get > 200 candles for the Alpha Engine
+            if interval == '1m':
+                days_back = 3  # ~1,170 candles
+            elif interval == '5m':
+                days_back = 5  # ~390 candles
+            elif interval == '15m':
+                days_back = 15  # ~390 candles
+            elif interval == '1h':
+                days_back = 45  # ~315 candles
+            else:
+                days_back = 5
+
+            # Download the tape
+            df = yf.download(symbol, period=f"{days_back}d", interval=interval, progress=False)
 
             if df.empty:
                 return "ERROR: No historical data found."
 
-            # Flatten multi-index columns (handles behavior in newer yfinance versions)
+            # Flatten multi-index columns (handles newer yfinance versions)
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
 
