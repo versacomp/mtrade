@@ -1,4 +1,5 @@
 import os
+import pyqtgraph as pg
 from PyQt6.QtWidgets import (
     QMainWindow, QDockWidget, QListWidget, QTextEdit,
     QToolBar, QPushButton, QWidget, QHBoxLayout, QLabel
@@ -13,12 +14,20 @@ from ui.blotter import OphirOrderBlotter
 from ui.dashboard import OphirPerformanceDashboard
 from engine.streamer import MarketDataStreamer
 from engine.broker import OphirBroker
+from collections import deque
 
 class OphirTradeIDE(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("OphirTrade - Quant Developer IDE")
         self.resize(1400, 900)
+
+        # --- Live Data Buffers ---
+        # Keep a rolling window of the last 1000 ticks to prevent memory leaks
+        self.live_price_buffer = deque(maxlen=1000)
+        self.live_time_buffer = deque(maxlen=1000)
+        self.tick_count = 0
+        self.live_curve = None  # This will hold our specific pyqtgraph line
 
         # Track the currently open file so we can save it
         self.current_file_path = None
@@ -243,6 +252,17 @@ class OphirTradeIDE(QMainWindow):
             try:
                 self.live_broker = OphirBroker(is_live=False)
 
+                # --- PREPARE THE CHART FOR LIVE DATA ---
+                # Clear any existing backtest candlesticks
+                self.chart_widget.clear_chart()
+                self.live_curve = self.chart_widget.create_live_line()
+
+                # Reset the memory buffers
+                self.live_price_buffer.clear()
+                self.live_time_buffer.clear()
+                self.tick_count = 0
+                # ---------------------------------------
+
                 # Start the background firehose, locked onto the S&P 500 ETF
                 self.streamer_thread = MarketDataStreamer(symbol="SPY", is_live=False)
                 self.streamer_thread.tick_signal.connect(self.process_live_tick)
@@ -256,18 +276,37 @@ class OphirTradeIDE(QMainWindow):
                 self.append_error(f"[NETWORK ERROR] Failed to authenticate stream: {str(e)}")
 
     def process_live_tick(self, data: dict):
-        """Catches the tick from the background thread."""
+        """Catches the tick, calculates the mid-price, and updates the GPU canvas."""
         if data.get("type") == "status":
             self.append_log(data.get("msg"))
+
         elif data.get("type") == "tick":
-            # For now, we print it to the matrix log.
-            # (Warning: The market firehose is extremely fast!)
             event = data.get('event_type')
-            symbol = data.get('symbol')
 
             if event == 'Quote':
-                msg = f"[TICKER] {symbol} | BID: {data.get('bid')} | ASK: {data.get('ask')}"
-                self.append_log(msg)
-            elif event == 'Trade':
-                msg = f"[TICKER] {symbol} | LAST: {data.get('price')} (Trade Executed)"
-                self.append_log(msg)
+                bid = data.get('bid')
+                ask = data.get('ask')
+                symbol = data.get('symbol')
+
+                # Validate that we actually received prices (sometimes pre-market quotes are empty)
+                if bid and ask:
+                    # 1. Cast the Decimals to floats to calculate the Mid-Price for the chart
+                    mid_price = float(bid + ask) / 2.0
+
+                    # 2. Add to the rolling memory buffers
+                    self.tick_count += 1
+                    self.live_time_buffer.append(self.tick_count)
+                    self.live_price_buffer.append(mid_price)
+
+                    # 3. Inject into the pyqtgraph GPU memory
+                    if self.live_curve:
+                        # We cast the deque to a list for pyqtgraph to render
+                        self.live_curve.setData(
+                            x=list(self.live_time_buffer),
+                            y=list(self.live_price_buffer)
+                        )
+
+                    # 4. Throttle the terminal matrix text (Only print every 25th tick)
+                    if self.tick_count % 25 == 0:
+                        msg = f"[LIVE MARKET] {symbol} | MID: {mid_price:.2f} | BID: {bid} ASK: {ask}"
+                        self.append_log(msg)

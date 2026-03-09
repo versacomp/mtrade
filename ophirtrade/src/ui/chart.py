@@ -58,6 +58,15 @@ class OphirTradeChart(QWidget):
         # connect='finite' tells pyqtgraph to ignore NaN values (like the first 19 periods of an SMA)
         self.plot_widget.plot(x=x_data, y=y_data, name=name, pen=pen, connect='finite')
 
+    def clear_chart(self):
+        """Wipes the chart clean for the live data feed."""
+        # Change 'self.graph' to whatever your internal pyqtgraph variable is named!
+        self.plot_widget.clear()
+
+    def create_live_line(self):
+        """Creates and returns a neon green line for the live WebSocket feed."""
+        return self.plot_widget.plot(pen=pg.mkPen('#50fa7b', width=2), name="Live SPY")
+
     def update_data(self, data):
         """
         Updates the chart with new OHLC data.
