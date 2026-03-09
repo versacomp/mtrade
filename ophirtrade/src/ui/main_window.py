@@ -601,11 +601,23 @@ class OphirTradeIDE(QMainWindow):
             except Exception as e:
                 self.append_error(f"[NETWORK ERROR] Failed to authenticate stream: {str(e)}")
 
-    def process_live_tick(self, data: dict):
+    def process_live_tick(self, data):
+        # 1. Handle Status Messages
         if data.get("type") == "status":
-            self.append_log(data.get("msg"))
+            self.append_log(data["msg"])
+            return
 
-        elif data.get("type") == "tick":
+        # 2. Handle Historical Seed Payload
+        if data.get("type") == "history":
+            self.live_candles.clear()
+            for c in data["data"]:
+                self.live_candles.append(c)
+            self.append_log(
+                f"[SYSTEM] DXLink Seeder perfectly aligned {len(self.live_candles)} native candles. Engine ARMED.")
+            return
+
+        # 3. Handle Live Ticks (Your existing code starts here...)
+        if data.get("type") == "tick":
             event = data.get('event_type')
 
             if event == 'Quote':
