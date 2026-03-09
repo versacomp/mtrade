@@ -111,24 +111,39 @@ class OphirBroker:
         try:
             import yfinance as yf
             import pandas as pd
+            import re
+
+            # --- TICKER TRANSLATION MATRIX ---
+            yf_symbol = symbol.upper().lstrip('/')  # Remove Tastytrade's leading slash if present
+
+            # Regex to detect Futures expiration codes (e.g., H6 for March 2026)
+            # Matches a base ticker followed by a standard month code (F,G,H,J,K,M,N,Q,U,V,X,Z) and 1-2 digits
+            match = re.match(r'^([A-Z]+)[FGHJKMNQUVXZ]\d{1,2}$', yf_symbol)
+
+            if match:
+                base = match.group(1)
+                yf_symbol = f"{base}=F"  # Convert MCDH6 -> MCD=F
+            elif yf_symbol in ["ES", "MES", "NQ", "MNQ", "RTY", "M2K", "YM", "MYM", "GC", "MGC", "CL", "MCL"]:
+                yf_symbol = f"{yf_symbol}=F"  # Catch raw base symbols just in case
+            # ---------------------------------
 
             # Dynamic Lookback: Ensure we always get > 200 candles for the Alpha Engine
             if interval == '1m':
-                days_back = 3  # ~1,170 candles
+                days_back = 3
             elif interval == '5m':
-                days_back = 5  # ~390 candles
+                days_back = 5
             elif interval == '15m':
-                days_back = 15  # ~390 candles
+                days_back = 15
             elif interval == '1h':
-                days_back = 45  # ~315 candles
+                days_back = 45
             else:
                 days_back = 5
 
-            # Download the tape
-            df = yf.download(symbol, period=f"{days_back}d", interval=interval, progress=False)
+            # Download the tape using the TRANSLATED symbol
+            df = yf.download(yf_symbol, period=f"{days_back}d", interval=interval, progress=False)
 
             if df.empty:
-                return "ERROR: No historical data found."
+                return f"ERROR: No historical data found for YF symbol {yf_symbol}."
 
             # Flatten multi-index columns (handles newer yfinance versions)
             if isinstance(df.columns, pd.MultiIndex):
