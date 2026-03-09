@@ -283,6 +283,15 @@ class OphirTradeIDE(QMainWindow):
         self.txt_symbol.textChanged.connect(lambda text: self.txt_symbol.setText(text.upper()))
         toolbar.addWidget(self.txt_symbol)
 
+        # --- TIMEFRAME DROPDOWN ---
+        self.combo_timeframe = QComboBox()
+        self.combo_timeframe.addItems(["1 Minute", "5 Minutes", "15 Minutes", "1 Hour"])
+        self.combo_timeframe.setStyleSheet(
+            "background-color: #2b2b2b; color: #f8f8f2; border: 1px solid #6272a4; padding: 5px;")
+
+        # Add it to your toolbar layout (Example:)
+        toolbar.addWidget(self.combo_timeframe)
+
         # 2. NOW SET THE VARIABLE
         # Because self.txt_symbol exists now, we can safely read it.
         self.active_symbol = self.txt_symbol.text().strip()
