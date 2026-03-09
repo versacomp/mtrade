@@ -462,8 +462,9 @@ class OphirTradeIDE(QMainWindow):
             self.streamer_thread = None
             self.btn_live_data.setText("Connect Live Data Feed")
             self.btn_live_data.setStyleSheet("background-color: #2b2b2b; color: #50fa7b; border: 1px solid #50fa7b;")
-            self.append_log("[SYSTEM] Live WebSocket feed terminated.")
             self.txt_symbol.setEnabled(True)  # Unlock the text box
+            self.combo_timeframe.setEnabled(True) # Unlock the timeframe combobox
+            self.append_log("[SYSTEM] Live WebSocket feed severed successfully.")
         else:
             # Connect
             self.append_log("[SYSTEM] Initializing secure OAuth session for live data...")
@@ -474,12 +475,29 @@ class OphirTradeIDE(QMainWindow):
             try:
                 # 1. Grab the active symbol from the UI FIRST
                 self.active_symbol = self.txt_symbol.text().strip()
+                tf_text = self.combo_timeframe.currentText()
 
                 if not self.active_symbol:
                     self.append_error("[SYSTEM] Ticker symbol cannot be empty.")
                     return
 
+                # Map UI Text to Engine Variables
+                if tf_text == "1 Minute":
+                    self.timeframe_minutes = 1
+                    yf_interval = '1m'
+                elif tf_text == "5 Minutes":
+                    self.timeframe_minutes = 5
+                    yf_interval = '5m'
+                elif tf_text == "15 Minutes":
+                    self.timeframe_minutes = 15
+                    yf_interval = '15m'
+                elif tf_text == "1 Hour":
+                    self.timeframe_minutes = 60
+                    yf_interval = '1h'
+
+                # Lock the UI inputs
                 self.txt_symbol.setEnabled(False)
+                self.combo_timeframe.setEnabled(False)
 
                 # Inject the dynamic UI state into the networking engines
                 self.live_broker = OphirBroker(is_live=self.is_live_mode)
@@ -489,17 +507,22 @@ class OphirTradeIDE(QMainWindow):
                     f"[SYSTEM] Requesting historical tape for {self.active_symbol} to seed the Alpha Engine...")
                 history = self.live_broker.get_historical_candles(self.active_symbol)
 
+                # Dynamic Seeder
+                self.append_log(
+                    f"[SYSTEM] Requesting {yf_interval} historical tape for {self.active_symbol} to seed the Alpha Engine...")
+
+                history = self.live_broker.get_historical_candles(self.active_symbol, interval=yf_interval)
+
                 if isinstance(history, str):
                     self.append_log(f"[WARN] Seeder failed: {history}. Engine will cold start.")
                     self.live_candles.clear()
                 else:
                     self.live_candles.clear()
-                    # Cap the history injection so we don't overflow the 250-candle deque
+                    # Cap the history injection so we don't overflow
                     for c in history[-250:]:
                         self.live_candles.append(c)
                     self.append_log(
-                        f"[SYSTEM] Seeder injected {len(self.live_candles)} historical candles. Engine ARMED.")
-                # ------------------------------
+                        f"[SYSTEM] Seeder injected {len(self.live_candles)} historical {yf_interval} candles. Engine ARMED.")
 
                 # --- PREPARE THE CHART FOR LIVE DATA ---
                 # Clear any existing backtest candlesticks
