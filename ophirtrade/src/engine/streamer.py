@@ -58,33 +58,59 @@ class MarketDataStreamer(QThread):
                 refresh_token = os.getenv("TASTYTRADE_REFRESH_TOKEN_SANDBOX")
                 session = Session(client_secret, refresh_token, is_test=True)
 
-                # 2. Open the WebSocket using the dedicated session
-                async with DXLinkStreamer(session) as streamer:
+            # 2. Open ONE WebSocket connection for both History and Live Data
+            async with DXLinkStreamer(session) as streamer:
 
-                    # Subscribe ONLY to the Quote (Bid/Ask) stream
-                    await streamer.subscribe(Quote, [self.symbol])
+                # --- PHASE 1: DXLink Historical Seeder ---
+                self.tick_signal.emit(
+                    {"type": "status", "msg": f"[STREAMER] Requesting DXLink history for {self.symbol}..."})
 
-                    self.tick_signal.emit({"type": "status", "msg": f"[STREAMER] WebSocket locked onto {self.symbol}."})
+                # Look back exactly 3 days to guarantee we hit 250 candles
+                start_date = datetime.now() - timedelta(days=3)
+                await streamer.subscribe_candle([self.symbol], '1m', start_date)
 
-                    async for event in streamer.listen(Quote):
-                        if not self._is_running:
-                            break
+                history_candles = []
+                async for event in streamer.listen(Candle):
+                    if not self._is_running: break
 
-                        tick_data = {
-                            "type": "tick",
-                            "symbol": getattr(event, 'event_symbol', self.symbol),
-                            "event_type": type(event).__name__,
-                            "bid": getattr(event, 'bid_price', None),
-                            "ask": getattr(event, 'ask_price', None)
-                        }
+                    history_candles.append({
+                        'open': float(event.open),
+                        'high': float(event.high),
+                        'low': float(event.low),
+                        'close': float(event.close),
+                        'volume': float(event.volume)
+                    })
 
-                        self.tick_signal.emit(tick_data)
+                    # Stop listening to history once the buffer is full
+                    if len(history_candles) >= 250:
+                        break
 
+                # Emit the historical payload back to the main UI thread
+                self.tick_signal.emit({
+                    "type": "history",
+                    "data": history_candles[-250:]  # Ensure exactly 250
+                })
+
+                # --- PHASE 2: Live Quote Streamer ---
+                self.tick_signal.emit(
+                    {"type": "status", "msg": f"[STREAMER] History injected. Locking onto live {self.symbol} tape..."})
+
+                # Subscribe to the live bid/ask tape
+                await streamer.subscribe(Quote, [self.symbol])
+
+                async for event in streamer.listen(Quote):
+                    if not self._is_running: break
+
+                    tick_data = {
+                        "type": "tick",
+                        "symbol": getattr(event, 'event_symbol', self.symbol),
+                        "event_type": type(event).__name__,
+                        "bid": getattr(event, 'bid_price', None),
+                        "ask": getattr(event, 'ask_price', None)
+                    }
+                    self.tick_signal.emit(tick_data)
 
         except Exception as e:
-
-            # Unpack the ExceptionGroup to reveal the true network error
-
             self.error_signal.emit(f"[STREAMER DISCONNECT] \n{traceback.format_exc()}")
 
     def stop(self):
