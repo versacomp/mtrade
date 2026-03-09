@@ -29,30 +29,34 @@ class OphirTradeChart(QWidget):
         self.candlesticks = None
 
     def set_real_data(self, df):
-        """
-        Catches the Pandas DataFrame from the background thread and paints it.
-        """
-        # 1. Clear the old chart if a user runs back-to-back backtests
-        if self.candlesticks is not None:
-            self.plot_widget.removeItem(self.candlesticks)
+        """Draws the base candlesticks."""
+        # --- NEW: Completely wipe the canvas before drawing ---
+        self.plot_widget.clear()
 
-        # 2. Extract the data.
-        # pyqtgraph expects an x-axis integer index for smooth zooming.
         data_list = []
-
-        # We use itertuples() because iterating over a DataFrame is usually slow,
-        # but itertuples() strips the overhead and gives us pure C-speed tuples.
         for i, row in enumerate(df.itertuples()):
-            # row[0] is index, row[1] is open, row[2] is high, row[3] is low, row[4] is close
-            # Our CandlestickItem expects: (time, open, close, low, high)
             data_list.append((i, row.open, row.close, row.low, row.high))
 
-        # 3. Instantiate the graphics object and slam it onto the GPU
         self.candlesticks = CandlestickItem(data_list)
         self.plot_widget.addItem(self.candlesticks)
-
-        # 4. Auto-scale the view to fit the new data perfectly
         self.plot_widget.autoRange()
+
+    def add_indicator(self, name, series, color):
+        """
+        Catches the Pandas Series from the background thread and draws it.
+        """
+        # 1. Convert the Pandas Series to a pure C-speed Numpy array
+        y_data = series.to_numpy()
+
+        # 2. Create the X-axis (0 to 50000 to match the candlesticks)
+        x_data = np.arange(len(y_data))
+
+        # 3. Create the pen using the provided Hex color
+        pen = pg.mkPen(color=color, width=2)
+
+        # 4. Plot it!
+        # connect='finite' tells pyqtgraph to ignore NaN values (like the first 19 periods of an SMA)
+        self.plot_widget.plot(x=x_data, y=y_data, name=name, pen=pen, connect='finite')
 
     def update_data(self, data):
         """

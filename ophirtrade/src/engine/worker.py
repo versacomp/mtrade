@@ -25,6 +25,10 @@ class OphirExecutionEngine(QThread):
     data_ready_signal = pyqtSignal(object)
     order_signal = pyqtSignal(dict)
 
+    # The Indicator Signal ---
+    # Passes: (Indicator Name, Pandas Series, Hex Color)
+    indicator_signal = pyqtSignal(str, object, str)
+
     def __init__(self, code_string):
         super().__init__()
         self.code_string = code_string
@@ -64,12 +68,19 @@ class OphirExecutionEngine(QThread):
                 self.order_signal.emit(order)
                 self.log_signal.emit(f"[BROKER] Routed {side} {qty}x {symbol} @ {price}")
 
+            # --- Create the mock plotting API function ---
+            def execute_plot(series: pd.Series, name: str = "Indicator", color: str = "#FFC66D"):
+                """This function is injected into the user's environment to draw on the chart."""
+                self.indicator_signal.emit(name, series, color)
+                self.log_signal.emit(f"[CHART] Plotting overlay: {name}")
+
             # Inject Data AND the new order routing function
             isolated_namespace = {
                 'historical_df': market_data,
                 'pd': pd,
                 'np': np,
-                'send_order': execute_broker_order  # <--- The Magic Bridge
+                'send_order': execute_broker_order,  # <--- The Magic Bridge
+                'plot': execute_plot # <--- The Magic Plotting Bridge
             }
 
             # 3. Execute the user's script

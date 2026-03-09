@@ -172,6 +172,9 @@ class OphirTradeIDE(QMainWindow):
         # --- Connect the Blotter Signal ---
         self.engine_thread.order_signal.connect(self.blotter.add_order)
 
+        # --- Connect the Indicator Signal ---
+        self.engine_thread.indicator_signal.connect(self.chart_widget.add_indicator)
+
         self.engine_thread.start()
 
     def action_deploy_live(self):
