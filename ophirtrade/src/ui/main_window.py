@@ -452,7 +452,8 @@ class OphirTradeIDE(QMainWindow):
         self.terminal.append("=" * 40 + "\n")
 
     def toggle_live_stream(self):
-        if self.streamer_thread and self.streamer_thread.isRunning():
+        # Check if the object exists, completely ignoring its .isRunning() state
+        if getattr(self, 'streamer_thread', None) is not None:
             # Disconnect
             self.append_log("[SYSTEM] Initiating streamer shutdown sequence...")
             self.streamer_thread.stop()
