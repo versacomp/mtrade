@@ -1,6 +1,8 @@
 import os
 import time
 import datetime
+import re
+import pyqtgraph as pg
 from PyQt6.QtWidgets import (
     QMainWindow, QDockWidget, QListWidget, QTextEdit,
     QToolBar, QPushButton, QWidget, QHBoxLayout,
