@@ -40,8 +40,15 @@ class MarketDataStreamer(QThread):
 
     async def _stream_data(self):
         """The core async WebSocket connection."""
+        from tastytrade.session import Session
+        from tastytrade import DXLinkStreamer
+        from tastytrade.dxfeed import Quote, Candle
+        from datetime import datetime, timedelta
+        import os
+        import traceback
+
         try:
-            # 1. Initialize an independent Session bound STRICTLY to this thread's event loop
+            # 1. Initialize an independent Session bound STRICTLY to this thread
             if self.is_live:
                 client_secret = os.getenv("TASTYTRADE_CLIENT_SECRET")
                 refresh_token = os.getenv("TASTYTRADE_REFRESH_TOKEN")
