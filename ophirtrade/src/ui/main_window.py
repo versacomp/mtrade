@@ -524,11 +524,6 @@ class OphirTradeIDE(QMainWindow):
                 # Inject the dynamic UI state into the networking engines
                 self.live_broker = OphirBroker(is_live=self.is_live_mode)
 
-                # --- HISTORICAL SEEDER ---
-                self.append_log(
-                    f"[SYSTEM] Requesting historical tape for {self.active_symbol} to seed the Alpha Engine...")
-                history = self.live_broker.get_historical_candles(self.active_symbol)
-
                 # Dynamic Seeder
                 self.append_log(
                     f"[SYSTEM] Requesting {yf_interval} historical tape for {self.active_symbol} to seed the Alpha Engine...")
