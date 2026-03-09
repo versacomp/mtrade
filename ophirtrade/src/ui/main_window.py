@@ -34,8 +34,10 @@ class OphirTradeIDE(QMainWindow):
         # --- THE RISK MANAGER ---
         self.active_trade = None  # Holds the dictionary of the live position
 
-        # --- Environment State ---
-        self.is_live_mode = False  # Defaults to Sandbox for safety
+        # --- EXECUTION STATE ---
+        self.is_live_mode = False  # True = Connect to Production API
+        self.paper_trade = False  # True = Bypass Broker Routing
+
         self.active_symbol = "SPY"
 
         # --- Live Data Buffers ---
@@ -337,17 +339,18 @@ class OphirTradeIDE(QMainWindow):
         self.btn_halt.clicked.connect(self.halt_all_trading)
         toolbar.addWidget(self.btn_halt)
 
-        # --- NEW: PRODUCTION MODE TOGGLE ---
-        self.btn_mode_toggle = QPushButton("MODE: SANDBOX")
-        self.btn_mode_toggle.setStyleSheet(
-            "background-color: #ffb86c; "  # Darcula Orange
-            "color: #282a36; "
-            "font-weight: bold; "
-            "border: 2px solid #ffb86c; "
-            "padding: 5px 15px;"
-        )
-        self.btn_mode_toggle.clicked.connect(self.toggle_trading_mode)
-        toolbar.addWidget(self.btn_mode_toggle)
+        # --- 3-WAY ENVIRONMENT TOGGLE ---
+        self.combo_env = QComboBox()
+        self.combo_env.addItems([
+            "SANDBOX (Cert Data & Exec)",
+            "PAPER (Live Data & Local Exec)",
+            "LIVE (Live Data & Real Money)"
+        ])
+        self.combo_env.setStyleSheet("""
+                    QComboBox { background-color: #44475a; color: #f1fa8c; font-weight: bold; border: 1px solid #f1fa8c; padding: 5px; }
+                """)
+        self.combo_env.currentTextChanged.connect(self._on_env_changed)
+        toolbar.addWidget(self.combo_env)
 
         # --- THE QUANTITATIVE ALPHA ENGINE ---
         self.alpha_engine = AlphaEngine()
@@ -789,47 +792,56 @@ class OphirTradeIDE(QMainWindow):
             }
 
             if self.live_broker:
-                response = self.live_broker.route_order(symbol, "SELL_SHORT", 1)
-                self.market_position = -1
-                self.append_log(f"[RISK MGR] SHORT {symbol} | Entry: {current_price:.2f} | SL: {sl:.2f} | TP: {tp:.2f}")
-                self.append_log(f"[BROKER] {response}")
+                if self.paper_trade:
+                    self.append_log(f"[PAPER] Simulated SELL_SHORT order locked locally. Wall Street bypassed.")
+                else:
+                    response = self.live_broker.route_order(symbol, "SELL_SHORT", 1)
+                    self.market_position = -1
+                    self.append_log(f"[RISK MGR] SHORT {symbol} | Entry: {current_price:.2f} | SL: {sl:.2f} | TP: {tp:.2f}")
+                    self.append_log(f"[BROKER] {response}")
 
-    def toggle_trading_mode(self):
-        """Switches the application between Sandbox and Live Production routing."""
-
-        # SAFETY INTERLOCK: Do not allow mode switching while the matrix is online
-        if self.streamer_thread and self.streamer_thread.isRunning():
-            self.append_log("[SECURITY] Cannot switch modes while the data feed is active.")
-            self.append_log("[SECURITY] Please Disconnect or HALT ALL first.")
-            return
-
-        # Flip the state
-        self.is_live_mode = not self.is_live_mode
-
-        # Update the UI
-        if self.is_live_mode:
-            self.btn_mode_toggle.setText("MODE: LIVE PRODUCTION")
-            self.btn_mode_toggle.setStyleSheet(
-                "background-color: #ff5555; "  # Darcula Red
-                "color: #ffffff; "
-                "font-weight: bold; "
-                "border: 2px solid #ff0000; "
-                "padding: 5px 15px;"
+    def _on_env_changed(self, text):
+        """Safety interlock for Data and Execution environments."""
+        if "LIVE (Live Data" in text:
+            # STATE 3: FULL PRODUCTION (DANGER)
+            reply = QMessageBox.warning(
+                self,
+                "DANGER: LIVE TRADING ARMED",
+                "You are switching the execution engine to FULL LIVE mode.\n\n"
+                "The Alpha Engine will now trade REAL CAPITAL on the production Tastytrade servers.\n\n"
+                "Are you absolutely sure you want to proceed?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
             )
-            self.append_log("\n[WARNING] =========================================")
-            self.append_log("[WARNING] PRODUCTION MODE ARMED.")
-            self.append_log("[WARNING] Real capital is now at risk. OAuth routing shifted to Live APIs.")
-            self.append_log("[WARNING] =========================================\n")
+
+            if reply == QMessageBox.StandardButton.No:
+                self.combo_env.blockSignals(True)
+                self.combo_env.setCurrentIndex(1)  # Default back to safe Paper mode
+                self.combo_env.blockSignals(False)
+                return
+
+            self.is_live_mode = True
+            self.paper_trade = False
+            self.combo_env.setStyleSheet(
+                "QComboBox { background-color: #ff5555; color: #ffffff; font-weight: bold; border: 2px solid #ff5555; padding: 5px; }")
+            self.append_log("[EMERGENCY] WARNING: LIVE MONEY TRADING ARMED. PRODUCTION CLEARINGHOUSE ACTIVE.")
+
+        elif "PAPER" in text:
+            # STATE 2: PRODUCTION DATA + LOCAL PAPER EXECUTION (SAFE)
+            self.is_live_mode = True
+            self.paper_trade = True
+            # Style it a cool blue to indicate active data but safe execution
+            self.combo_env.setStyleSheet(
+                "QComboBox { background-color: #8be9fd; color: #282a36; font-weight: bold; border: 2px solid #8be9fd; padding: 5px; }")
+            self.append_log("[SYSTEM] Data switched to Production. Execution bypassed (Paper Mode Active).")
+
         else:
-            self.btn_mode_toggle.setText("MODE: SANDBOX")
-            self.btn_mode_toggle.setStyleSheet(
-                "background-color: #ffb86c; "
-                "color: #282a36; "
-                "font-weight: bold; "
-                "border: 2px solid #ffb86c; "
-                "padding: 5px 15px;"
-            )
-            self.append_log("[SYSTEM] Production Mode disarmed. System returned to Sandbox simulation.")
+            # STATE 1: CERT DATA + CERT EXECUTION (SAFE)
+            self.is_live_mode = False
+            self.paper_trade = False
+            self.combo_env.setStyleSheet(
+                "QComboBox { background-color: #44475a; color: #f1fa8c; font-weight: bold; border: 1px solid #f1fa8c; padding: 5px; }")
+            self.append_log("[SYSTEM] Matrix reverted to secure Sandbox Simulation.")
 
     def _close_active_trade(self, exit_price: float, pnl: float, status: str):
         """Flattens the position and records the financial outcome to SQLite."""
