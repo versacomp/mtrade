@@ -784,6 +784,9 @@ class OphirTradeIDE(QMainWindow):
     def _process_quant_action(self, action: int, symbol: str, current_price: float):
         """Translates Alpha signals into strict risk-managed orders."""
 
+        # We need the current timestamp for the X-axis of our chart
+        current_time = time.time()
+
         # If we are already in a trade, we ignore new signals until it closes (or you can add flip logic)
         if self.active_trade is not None:
             return
