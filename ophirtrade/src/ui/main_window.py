@@ -438,8 +438,16 @@ class OphirTradeIDE(QMainWindow):
     def toggle_live_stream(self):
         if self.streamer_thread and self.streamer_thread.isRunning():
             # Disconnect
+            self.append_log("[SYSTEM] Initiating streamer shutdown sequence...")
             self.streamer_thread.stop()
-            self.streamer_thread.wait()
+
+            # Give the thread 1 second to exit gracefully.
+            # If it refuses because it is blocked by network I/O, execute it.
+            if not self.streamer_thread.wait(1000):
+                self.append_log("[SYSTEM] Network thread unresponsive. Forcing termination.")
+                self.streamer_thread.terminate()  # Brutally sever the C++ wrapper
+                self.streamer_thread.wait()  # Confirm the kill
+
             self.streamer_thread = None
             self.btn_live_data.setText("Connect Live Data Feed")
             self.btn_live_data.setStyleSheet("background-color: #2b2b2b; color: #50fa7b; border: 1px solid #50fa7b;")
