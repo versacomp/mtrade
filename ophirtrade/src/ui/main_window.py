@@ -10,6 +10,7 @@ from ui.chart import OphirTradeChart
 from ui.explorer import OphirFileExplorer
 from engine.worker import OphirExecutionEngine
 from ui.blotter import OphirOrderBlotter
+from ui.dashboard import OphirPerformanceDashboard
 
 class OphirTradeIDE(QMainWindow):
     def __init__(self):
@@ -63,6 +64,16 @@ class OphirTradeIDE(QMainWindow):
 
         dock.setWidget(self.file_explorer)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
+
+        # --- Build the Dashboard Dock ---
+        dashboard_dock = QDockWidget("Strategy Performance", self)
+        dashboard_dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+
+        self.dashboard = OphirPerformanceDashboard()
+        dashboard_dock.setWidget(self.dashboard)
+
+        # Snap it directly beneath the file explorer
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dashboard_dock)
 
     def load_file_to_editor(self, file_path, content):
         """Triggered by the file explorer double-click."""
@@ -174,6 +185,9 @@ class OphirTradeIDE(QMainWindow):
 
         # --- Connect the Indicator Signal ---
         self.engine_thread.indicator_signal.connect(self.chart_widget.add_indicator)
+
+        # --- Connect the Stats Signal ---
+        self.engine_thread.stats_signal.connect(self.dashboard.update_stats)
 
         self.engine_thread.start()
 

@@ -29,6 +29,9 @@ class OphirExecutionEngine(QThread):
     # Passes: (Indicator Name, Pandas Series, Hex Color)
     indicator_signal = pyqtSignal(str, object, str)
 
+    # --- The Statistics Signal ---
+    stats_signal = pyqtSignal(dict)
+
     def __init__(self, code_string):
         super().__init__()
         self.code_string = code_string
@@ -89,6 +92,21 @@ class OphirExecutionEngine(QThread):
             # 4. Look for an entry point that takes the DataFrame as an argument
             if 'execute_trade' in isolated_namespace:
                 isolated_namespace['execute_trade'](market_data)
+
+                # --- Generate and emit the final performance metrics ---
+                self.log_signal.emit("[ENGINE] Calculating final strategy metrics...")
+
+                # Mocking the calculation engine's output
+                final_stats = {
+                    "net_profit": 4250.50,
+                    "win_rate": 62.5,
+                    "total_trades": 14,
+                    "max_drawdown": -4.2,
+                    "profit_factor": 1.85,
+                    "sharpe_ratio": 1.4
+                }
+
+                self.stats_signal.emit(final_stats)
             else:
                 self.log_signal.emit("[WARN] Missing 'execute_trade(df)' entry point.")
 
