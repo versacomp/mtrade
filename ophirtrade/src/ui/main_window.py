@@ -197,14 +197,17 @@ class OphirTradeIDE(QMainWindow):
         spacer.setFixedSize(20, 20)
         toolbar.addWidget(spacer)
 
-        # --- Button 3: The Kill Switch ---
-        btn_halt = QPushButton("🛑 HALT ALL")
-        btn_halt.setStyleSheet("""
-            QPushButton { background-color: #9e2a2b; color: white; font-weight: bold; padding: 6px 12px; border-radius: 4px; }
-            QPushButton:hover { background-color: #c9383a; }
-        """)
-        btn_halt.clicked.connect(self.action_halt_execution)
-        toolbar.addWidget(btn_halt)
+        # --- NEW: EMERGENCY HALT BUTTON ---
+        self.btn_halt = QPushButton("🛑 HALT ALL")
+        self.btn_halt.setStyleSheet(
+            "background-color: #ff5555; "
+            "color: #ffffff; "
+            "font-weight: bold; "
+            "border: 2px solid #ff0000; "
+            "padding: 5px 15px;"
+        )
+        self.btn_halt.clicked.connect(self.halt_all_trading)
+        toolbar.addWidget(self.btn_halt)
 
     # --- The Action Slots (Where the magic will happen) ---
 
@@ -389,3 +392,46 @@ class OphirTradeIDE(QMainWindow):
             if self.live_broker:
                 response = self.live_broker.route_order(symbol=symbol, side="SELL", qty=1, price=None)
                 self.append_log(f"[BROKER] {response}")
+
+    def halt_all_trading(self):
+        """The Master Kill Switch: Severs data, stops the AI, and flattens all positions."""
+        self.append_log("\n[EMERGENCY] =========================================")
+        self.append_log("[EMERGENCY] HALT ALL PROTOCOL INITIATED.")
+
+        # 1. SEVER THE DATA FIREHOSE
+        if self.streamer_thread and self.streamer_thread.isRunning():
+            self.streamer_thread.stop()
+            self.streamer_thread.wait()
+            self.streamer_thread = None
+
+            # Reset the Live Data button UI
+            self.btn_live_data.setText("Connect Live Data Feed")
+            self.btn_live_data.setStyleSheet("background-color: #2b2b2b; color: #50fa7b; border: 1px solid #50fa7b;")
+            self.append_log("[EMERGENCY] WebSocket data stream severed. AI is blind.")
+
+            # Update the AI label
+            self.lbl_ai_confidence.setText("AI State: SYSTEM HALTED")
+            self.lbl_ai_confidence.setStyleSheet(
+                "color: #ff5555; font-weight: bold; font-family: Consolas; padding: 5px;")
+
+        # 2. FLATTEN THE MARKET POSITION
+        # We hardcoded SPY for our test, so we use SPY here.
+        # In a fully dynamic system, you would track the active symbol.
+        target_symbol = "SPY"
+
+        if self.market_position == 1:
+            self.append_log(f"[EMERGENCY] Liquidating LONG position on {target_symbol}...")
+            if self.live_broker:
+                try:
+                    # Fire a Market SELL order to close out the 1 share
+                    response = self.live_broker.route_order(symbol=target_symbol, side="SELL", qty=1, price=None)
+                    self.append_log(f"[BROKER] {response}")
+                except Exception as e:
+                    self.append_log(f"[BROKER FATAL] Failed to route liquidation order: {str(e)}")
+
+            self.market_position = 0
+
+        elif self.market_position == 0:
+            self.append_log("[EMERGENCY] Market position is currently FLAT. No liquidation required.")
+
+        self.append_log("[EMERGENCY] =========================================\n")
