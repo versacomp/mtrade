@@ -105,3 +105,36 @@ class OphirBroker:
             return balances, positions
         except Exception as e:
             return f"ERROR: {str(e)}", None
+
+    def get_historical_candles(self, symbol: str, days_back: int = 3):
+        """Fetches historical 1-minute candles from Yahoo Finance to instantly seed the Alpha Engine."""
+        try:
+            import yfinance as yf
+            import pandas as pd
+
+            # Download the 1-minute tape for the last 3 days
+            df = yf.download(symbol, period=f"{days_back}d", interval='1m', progress=False)
+
+            if df.empty:
+                return "ERROR: No historical data found."
+
+            # Flatten multi-index columns (handles behavior in newer yfinance versions)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+
+            formatted_candles = []
+            for _, row in df.iterrows():
+                formatted_candles.append({
+                    'open': float(row['Open']),
+                    'high': float(row['High']),
+                    'low': float(row['Low']),
+                    'close': float(row['Close']),
+                    'volume': float(row['Volume'])
+                })
+
+            return formatted_candles
+
+        except ImportError:
+            return "ERROR: Missing yfinance. Run: pip install yfinance pandas"
+        except Exception as e:
+            return f"ERROR: {str(e)}"

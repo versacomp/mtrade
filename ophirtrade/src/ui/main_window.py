@@ -1,7 +1,5 @@
 import os
-import numpy as np
-import pandas as pd
-import torch
+import time
 from PyQt6.QtWidgets import (
     QMainWindow, QDockWidget, QListWidget, QTextEdit,
     QToolBar, QPushButton, QWidget, QHBoxLayout,
@@ -18,9 +16,10 @@ from ui.dashboard import OphirPerformanceDashboard
 from engine.streamer import MarketDataStreamer
 from engine.broker import OphirBroker
 from collections import deque
-from stable_baselines3 import PPO
 from ai.vector_state import StateVectorizer
 from ai.risk_engine import AccountState
+from engine.alpha_engine import AlphaEngine
+from engine.database import OphirDatabase
 
 class OphirTradeIDE(QMainWindow):
     def __init__(self):
@@ -76,30 +75,21 @@ class OphirTradeIDE(QMainWindow):
         self.save_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
         self.save_shortcut.activated.connect(self.save_current_file)
 
-        # --- THE AI GHOST VARIABLES ---
-        try:
-            self.ai_model = PPO.load("citadel_ppo_v1")
-            self.append_log("[SYSTEM] AI Model 'citadel_ppo_v1' loaded and standing by.")
-        except Exception as e:
-            self.ai_model = None
-            self.append_log(f"[WARN] No compiled AI found. Running in manual mode. ({str(e)})")
+        # --- THE QUANTITATIVE ALPHA ENGINE ---
+        self.alpha_engine = AlphaEngine()
+        self.append_log("[SYSTEM] Institutional Liquidity Engine loaded and standing by.")
 
-        # 1. Load your exact training vectorizer and risk engine
-        self.vectorizer = StateVectorizer(lookback_window=10)
-        self.live_account = AccountState()
+        # The Real-Time Candle Builder (Expanded to 250 for the SMA-200 filter)
+        self.live_candles = deque(maxlen=250)
 
-        # 2. The Real-Time Candle Builder
-        self.live_candles = deque(maxlen=10)
-        self.ticks_per_candle = 25  # E.g., aggregate 25 quote ticks into 1 synthetic "candle"
+        # Aggregate X ticks into 1 synthetic "candle"
+        # (In production, you'd match this to time, e.g., 1 minute)
+        self.ticks_per_candle = 25
         self.tick_counter = 0
         self.current_candle = {'open': None, 'high': None, 'low': None, 'close': None, 'volume': 0}
 
-        # The Execution Lock (0 = Flat, 1 = Long, -1 = Short)
-        # This prevents the AI from spamming the exchange.
+        # Execution Lock: 1 = Long, -1 = Short, 0 = Flat
         self.market_position = 0
-
-        # The Observation Window (Must match what the AI was trained on)
-        self.ai_window_size = 54
 
     def _build_market_explorer(self):
         dock = QDockWidget("Market Explorer", self)
@@ -343,6 +333,11 @@ class OphirTradeIDE(QMainWindow):
         self.btn_mode_toggle.clicked.connect(self.toggle_trading_mode)
         toolbar.addWidget(self.btn_mode_toggle)
 
+        # --- THE QUANTITATIVE ALPHA ENGINE ---
+        self.alpha_engine = AlphaEngine()
+        self.db = OphirDatabase()  # <--- NEW: Initialize the Local SQLite Storage
+        self.append_log("[SYSTEM] Institutional Liquidity Engine and SQLite Storage online.")
+
     def halt_all_trading(self):
         """The Master Kill Switch: Severs data, stops the AI, and flattens all positions."""
         self.append_log("\n[EMERGENCY] =========================================")
@@ -464,6 +459,23 @@ class OphirTradeIDE(QMainWindow):
                 # Inject the dynamic UI state into the networking engines
                 self.live_broker = OphirBroker(is_live=self.is_live_mode)
 
+                # --- HISTORICAL SEEDER ---
+                self.append_log(
+                    f"[SYSTEM] Requesting historical tape for {self.active_symbol} to seed the Alpha Engine...")
+                history = self.live_broker.get_historical_candles(self.active_symbol)
+
+                if isinstance(history, str):
+                    self.append_log(f"[WARN] Seeder failed: {history}. Engine will cold start.")
+                    self.live_candles.clear()
+                else:
+                    # Inject the history directly into the engine's memory buffer
+                    self.live_candles.clear()
+                    for c in history:
+                        self.live_candles.append(c)
+                    self.append_log(
+                        f"[SYSTEM] Seeder injected {len(self.live_candles)} historical candles. Engine ARMED.")
+                # ------------------------------
+
                 # --- PREPARE THE CHART FOR LIVE DATA ---
                 # Clear any existing backtest candlesticks
                 # 1. Grab the active symbol from the UI
@@ -550,93 +562,75 @@ class OphirTradeIDE(QMainWindow):
 
                     self.tick_counter += 1
 
-                    # --- 2. SEAL THE CANDLE AND FEED THE AI ---
+                    # --- 2. SEAL THE CANDLE AND FEED THE QUANT ENGINE ---
                     if self.tick_counter >= self.ticks_per_candle:
-                        self.live_candles.append(self.current_candle.copy())
+                        sealed_candle = self.current_candle.copy()
+                        self.live_candles.append(sealed_candle)
+
+                        # Log to the SQLite database for backtesting replays
+                        self.db.insert_candle(symbol, sealed_candle, time.time())
 
                         # Reset for the next candle
                         self.current_candle = {'open': None, 'high': None, 'low': None, 'close': None, 'volume': 0}
                         self.tick_counter = 0
 
-                        # Only trigger the AI if we have a full 10-candle window
-                        if self.ai_model and len(self.live_candles) == 10:
+                        # Only trigger the Engine if we have enough candles to calculate the SMA 200
+                        if len(self.live_candles) >= 200:
 
-                            # Convert our synthetic candles into the exact DataFrame the Vectorizer expects
-                            df_window = pd.DataFrame(list(self.live_candles))
+                            # 1. Evaluate the live tape
+                            intent = self.alpha_engine.evaluate(list(self.live_candles))
+                            action_val = intent["action"]
+                            direction = intent["direction"]
+                            level = intent["level"]
 
-                            # MAGIC: Translate the market into the AI's native language!
-                            obs_array = self.vectorizer.process_step(df_window, self.live_account)
-
-                            # Reshape for PyTorch -> shape: (1, 54)
-                            obs_tensor = obs_array.reshape(1, -1)
-
-                            # Ask the AI for a decision
-                            action, _states = self.ai_model.predict(obs_tensor, deterministic=True)
-                            action_val = int(action.item())
-
-                            # Get Telemetry
-                            obs_torch = torch.tensor(obs_tensor).to(self.ai_model.device)
-                            dist = self.ai_model.policy.get_distribution(obs_torch)
-                            probs = dist.distribution.probs.detach().cpu().numpy()[0]
-
-                            action_names = ["FLAT", "MICRO (1x)", "MINI (10x)"]
-                            selected_action = action_names[action_val]
-                            conf = probs[action_val] * 100
-
-                            # Update UI Label
-                            self.lbl_ai_confidence.setText(f"AI Matrix: {selected_action} ({conf:.1f}%)")
-
+                            # 2. Update UI Telemetry
                             if action_val == 0:
-                                self.lbl_ai_confidence.setStyleSheet(
-                                    "color: #ff5555; font-weight: bold; padding: 5px;")
+                                self.lbl_ai_confidence.setText("Alpha Engine: SCANNING...")
+                                self.lbl_ai_confidence.setStyleSheet("color: #8be9fd; font-weight: bold; padding: 5px;")
                             elif action_val == 1:
-                                self.lbl_ai_confidence.setStyleSheet(
-                                    "color: #f1fa8c; font-weight: bold; padding: 5px;")
+                                self.lbl_ai_confidence.setText(f"Alpha Engine: PRIME BULL GRAB @ {level:.2f}")
+                                self.lbl_ai_confidence.setStyleSheet("color: #50fa7b; font-weight: bold; padding: 5px;")
                             elif action_val == 2:
-                                self.lbl_ai_confidence.setStyleSheet(
-                                    "color: #50fa7b; font-weight: bold; padding: 5px;")
+                                self.lbl_ai_confidence.setText(f"Alpha Engine: PRIME BEAR GRAB @ {level:.2f}")
+                                self.lbl_ai_confidence.setStyleSheet("color: #ff5555; font-weight: bold; padding: 5px;")
 
-                                # Route execution intent
-                            self._process_ai_action(action_val, symbol, mid_price)
+                            # 3. Route to execution locks
+                            self._process_quant_action(action_val, symbol, mid_price)
+                        else:
+                            # Show a warm-up countdown in the UI
+                            candles_needed = 200 - len(self.live_candles)
+                            self.lbl_ai_confidence.setText(
+                                f"Alpha Engine: WARMING UP ({candles_needed} candles remaining)")
+                            self.lbl_ai_confidence.setStyleSheet("color: #f1fa8c; font-weight: bold; padding: 5px;")
 
-    def _process_ai_action(self, action: int, symbol: str, current_price: float):
-        """Translates the 0 (Flat), 1 (Micro), 2 (Mini) actions into dynamic buy/sell orders."""
+    def _process_quant_action(self, action: int, symbol: str, current_price: float):
+        """Translates rule-based Alpha signals into strict directional orders."""
 
-        # Target quantities (Sandbox mapped: Micro = 1 SPY, Mini = 10 SPY)
-        target_qty = 0
-        if action == 1:
-            target_qty = 1
-        elif action == 2:
-            target_qty = 10
+        # STATE CHANGE: Prime BULL Signal -> Reverse to LONG
+        if action == 1 and self.market_position <= 0:
+            self.append_log(f"[QUANT GHOST] Prime BULL liquidity grab detected on {symbol}. Initiating LONG sequence.")
 
-        current_qty = self.live_account.current_position
+            # If we are currently short (-1), we need to buy 2 shares to flip to long (1). Otherwise, buy 1.
+            qty_to_buy = 2 if self.market_position < 0 else 1
 
-        # If the AI wants to maintain the exact same position, do nothing
-        if target_qty == current_qty:
-            return
-
-            # STATE CHANGE: The AI wants to Flatline the portfolio
-        if action == 0 and current_qty > 0:
-            self.append_log(f"[AI GHOST] Flattening portfolio. Liquidating {current_qty} {symbol}.")
-            if self.live_broker:
-                self.live_broker.route_order(symbol, "SELL", current_qty)
-            self.live_account.current_position = 0
-
-        # STATE CHANGE: The AI wants to enter or size up
-        elif target_qty > current_qty:
-            qty_to_buy = target_qty - current_qty
-            self.append_log(f"[AI GHOST] Executing Alpha. BUY {qty_to_buy} {symbol}.")
             if self.live_broker:
                 self.live_broker.route_order(symbol, "BUY", qty_to_buy)
-            self.live_account.current_position = target_qty
+            self.market_position = 1
+            # Log the trade stats
+            self.db.insert_trade(symbol, "LONG", current_price)
 
-        # STATE CHANGE: The AI wants to reduce risk (e.g., Mini down to Micro)
-        elif target_qty < current_qty and target_qty > 0:
-            qty_to_sell = current_qty - target_qty
-            self.append_log(f"[AI GHOST] Risk reduction. SELL {qty_to_sell} {symbol}.")
+        # STATE CHANGE: Prime BEAR Signal -> Reverse to SHORT
+        elif action == 2 and self.market_position >= 0:
+            self.append_log(f"[QUANT GHOST] Prime BEAR liquidity grab detected on {symbol}. Initiating SHORT sequence.")
+
+            # If we are currently long (1), we need to sell 2 shares to flip to short (-1). Otherwise, sell 1.
+            qty_to_sell = 2 if self.market_position > 0 else 1
+
             if self.live_broker:
                 self.live_broker.route_order(symbol, "SELL", qty_to_sell)
-            self.live_account.current_position = target_qty
+            self.market_position = -1
+            # Log the trade stats
+            self.db.insert_trade(symbol, "SHORT", current_price)
 
     def toggle_trading_mode(self):
         """Switches the application between Sandbox and Live Production routing."""
