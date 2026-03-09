@@ -541,15 +541,6 @@ class OphirTradeIDE(QMainWindow):
                     self.append_log(
                         f"[SYSTEM] Seeder injected {len(self.live_candles)} historical {yf_interval} candles. Engine ARMED.")
 
-                # --- PREPARE THE CHART FOR LIVE DATA ---
-                # Clear any existing backtest candlesticks
-                # 1. Grab the active symbol from the UI
-                self.active_symbol = self.txt_symbol.text().strip()
-
-                if not self.active_symbol:
-                    self.append_error("[SYSTEM] Ticker symbol cannot be empty.")
-                    return
-
                 # 2. Lock the input box so the user can't change it mid-stream
                 self.txt_symbol.setEnabled(False)
 
