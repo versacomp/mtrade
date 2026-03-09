@@ -552,7 +552,7 @@ class OphirTradeIDE(QMainWindow):
 
                 # Update the pyqtgraph internal title (if you want the text directly on the grid)
                 if hasattr(self.chart_widget, 'graph'):
-                    self.chart_widget.graph.setTitle(
+                    self.chart_widget.plot_widget.setTitle(
                         f"<span style='color: #8be9fd; font-size: 14pt;'>{self.active_symbol} Live Tape</span>")
                 # ---------------------------------
 
