@@ -907,6 +907,19 @@ class OphirTradeIDE(QMainWindow):
         t['status'] = status
         t['exit_time'] = time.time()
 
+        current_time = time.time()
+
+        if t['direction'] == 'LONG':
+            # Closing a Long is a Sell (Red Down Arrow)
+            self.sell_x.append(current_time)
+            self.sell_y.append(exit_price)
+            self.sell_scatter.setData(self.sell_x, self.sell_y)
+        else:
+            # Closing a Short is a Buy (Green Up Arrow)
+            self.buy_x.append(current_time)
+            self.buy_y.append(exit_price)
+            self.buy_scatter.setData(self.buy_x, self.buy_y)
+
         # Fire closing order to the clearinghouse
         if self.live_broker:
             # To close a Long, we SELL. To close a Short, we BUY_TO_COVER.
