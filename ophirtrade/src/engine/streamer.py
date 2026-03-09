@@ -19,11 +19,12 @@ class MarketDataStreamer(QThread):
     tick_signal = pyqtSignal(dict)
     error_signal = pyqtSignal(str)
 
-    def __init__(self, symbol="SPY", is_live=False):
+    def __init__(self, symbol="SPY", is_live=False, session=None):
         super().__init__()
         self.symbol = symbol
         self.is_live = is_live
         self._is_running = True
+        self._session = session
 
     def run(self):
         """Creates a dedicated event loop just for the data firehose."""
