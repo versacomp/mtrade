@@ -71,9 +71,9 @@ class AlphaEngine:
         latest_sig.pro_trend = self._check_pro_trend(latest_sig, candles, sma200)
         latest_sig.in_range = self._check_range_rotation(latest_sig, candles, adx, range_upper, range_lower)
 
-        # 4. Tier 1 "Prime" Execution Logic
+        # 4. Tier 1 "Prime" Execution Logic --- FORCED TESTING: Fire on ANY divergence, ignoring Trend and ADX
         # A signal MUST have divergence, agree with the macro trend, and be in a ranging environment
-        if latest_sig.divergence and latest_sig.pro_trend and latest_sig.in_range:
+        if latest_sig.divergence: # and latest_sig.pro_trend and latest_sig.in_range:
             # We assign arbitrary high confidence for UI display since it passed all strict filters
             action_val = 1 if latest_sig.direction == "BULL" else 2  # 1=Buy, 2=Sell
             return {
