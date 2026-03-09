@@ -14,3 +14,12 @@ numpy>=1.26.0
 # Reinforcement learning
 gymnasium>=0.29.0
 stable-baselines3>=2.3.0
+
+# Tastytrade SDK (broker, streamer, liquidity bot)
+tastytrade>=8.0
+
+# Historical market data (broker fallback via yfinance)
+yfinance>=0.2.0
+
+# Environment configuration
+python-dotenv>=1.0.0

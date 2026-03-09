@@ -6,7 +6,7 @@ import pyqtgraph as pg
 from PyQt6.QtWidgets import (
     QMainWindow, QDockWidget, QListWidget, QTextEdit,
     QToolBar, QPushButton, QWidget, QHBoxLayout,
-    QVBoxLayout, QLabel, QLineEdit, QComboBox, QMessageBox
+    QVBoxLayout, QLabel, QLineEdit, QComboBox, QMessageBox, QCheckBox
 )
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
@@ -295,6 +295,21 @@ class OphirTradeIDE(QMainWindow):
 
         # Add it to your toolbar layout (Example:)
         toolbar.addWidget(self.combo_timeframe)
+
+        # --- NEW: ALPHA ENGINE FILTERS ---
+        self.chk_trend = QCheckBox("Trend Filter (SMA)")
+        self.chk_trend.setChecked(True)  # On by default
+        self.chk_trend.setStyleSheet(
+            "QCheckBox { color: #8be9fd; font-weight: bold; padding: 5px; } QCheckBox::indicator { width: 15px; height: 15px; }")
+
+        self.chk_range = QCheckBox("Range Filter")
+        self.chk_range.setChecked(True)  # On by default
+        self.chk_range.setStyleSheet(
+            "QCheckBox { color: #ffb86c; font-weight: bold; padding: 5px; } QCheckBox::indicator { width: 15px; height: 15px; }")
+
+        # Add them to your toolbar layout:
+        toolbar.addWidget(self.chk_trend)
+        toolbar.addWidget(self.chk_range)
 
         # 2. NOW SET THE VARIABLE
         # Because self.txt_symbol exists now, we can safely read it.
@@ -743,7 +758,11 @@ class OphirTradeIDE(QMainWindow):
 
                         # Trigger the Alpha Engine (if warmed up)
                         if len(self.live_candles) >= 200:
-                            intent = self.alpha_engine.evaluate(list(self.live_candles))
+                            intent = self.alpha_engine.evaluate(
+                                candles=list(self.live_candles),
+                                use_trend=self.chk_trend.isChecked(),
+                                use_range=self.chk_range.isChecked()
+                            )
                             action_val = intent["action"]
 
                             # UI Updates

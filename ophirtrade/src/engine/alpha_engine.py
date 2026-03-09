@@ -42,7 +42,7 @@ class AlphaEngine:
         # The engine requires at least 200 candles to calculate the SMA 200 trend filter
         self.REQUIRED_BUFFER = 200
 
-    def evaluate(self, raw_candles: List[dict]) -> dict:
+    def evaluate(self, candles: list, use_trend: bool = True, use_range: bool = True) -> dict:
         """
         Main entry point. Evaluates the live candle buffer and returns an execution intent.
         Returns: {"action": 0/1/2, "confidence": float, "direction": str, "level": float}
@@ -68,8 +68,14 @@ class AlphaEngine:
         # 3. Apply the Three Filters to the most recent signal
         latest_sig = signals[-1]
         latest_sig.divergence = self._check_rsi_divergence(latest_sig, candles, rsi)
-        latest_sig.pro_trend = self._check_pro_trend(latest_sig, candles, sma200)
-        latest_sig.in_range = self._check_range_rotation(latest_sig, candles, adx, range_upper, range_lower)
+        if use_trend:
+            latest_sig.pro_trend = self._check_pro_trend(latest_sig, candles, sma200)
+        else:
+            latest_sig.pro_trend = False
+        if use_range:
+            latest_sig.in_range = self._check_range_rotation(latest_sig, candles, adx, range_upper, range_lower)
+        else:
+            latest_sig.in_range = False
 
         # 4. Tier 1 "Prime" Execution Logic --- FORCED TESTING: Fire on ANY divergence, ignoring Trend and ADX
         # A signal MUST have divergence, agree with the macro trend, and be in a ranging environment
