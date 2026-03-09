@@ -479,9 +479,25 @@ class OphirTradeIDE(QMainWindow):
 
             # We initialize the broker purely to grab the authenticated session
             try:
-                # 1. Grab the active symbol from the UI FIRST
-                self.active_symbol = self.txt_symbol.text().strip()
+                # --- PREPARE THE CHART FOR LIVE DATA ---
+                # Clear any existing backtest candlesticks
+                # 1. Grab the active symbol from the UI
+                raw_symbol = self.txt_symbol.text().strip().upper()
                 tf_text = self.combo_timeframe.currentText()
+
+                if not raw_symbol:
+                    self.append_error("[SYSTEM] Ticker symbol cannot be empty.")
+                    return
+
+                # --- NEW: AUTO-FORMAT FUTURES SYMBOLS ---
+                # If it looks like a future (e.g. MESH6) and doesn't have a slash, add it
+                if re.match(r'^[A-Z]+[FGHJKMNQUVXZ]\d{1,2}$', raw_symbol) and not raw_symbol.startswith('/'):
+                    self.active_symbol = f"/{raw_symbol}"
+                    self.txt_symbol.setText(self.active_symbol)  # Update the UI visually
+                    self.append_log(f"[SYSTEM] Auto-formatted futures contract to {self.active_symbol}")
+                else:
+                    self.active_symbol = raw_symbol
+                # ----------------------------------------
 
                 if not self.active_symbol:
                     self.append_error("[SYSTEM] Ticker symbol cannot be empty.")
