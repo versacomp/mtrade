@@ -10,3 +10,9 @@ python-dotenv>=1.0.0
 
 # WebSocket client for DXLink streaming market data
 websockets>=12.0
+
+# Tastytrade SDK (liquidity bot)
+tastytrade>=8.0
+
+# Testing
+pytest>=8.0

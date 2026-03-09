@@ -1,0 +1,16 @@
+# OphirTrade - PyQt6 IDE + AI Engine
+
+# Qt UI framework
+PyQt6>=6.6.0
+PyQt6-QScintilla>=2.14.0
+
+# Charting
+pyqtgraph>=0.13.0
+
+# Data / numerics
+pandas>=2.0.0
+numpy>=1.26.0
+
+# Reinforcement learning
+gymnasium>=0.29.0
+stable-baselines3>=2.3.0

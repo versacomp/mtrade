@@ -4,7 +4,8 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 from PyQt6.QtCore import QThread, pyqtSignal
-
+from stable_baselines3 import PPO
+from ai.env import CitadelEnv
 
 class OutputRedirector:
     def __init__(self, signal):
@@ -77,13 +78,30 @@ class OphirExecutionEngine(QThread):
                 self.indicator_signal.emit(name, series, color)
                 self.log_signal.emit(f"[CHART] Plotting overlay: {name}")
 
+            # --- The AI Training API ---
+            def execute_training(df: pd.DataFrame, timesteps: int = 10000):
+                self.log_signal.emit(f"[AI] Constructing Citadel Dojo with {len(df)} ticks...")
+                env = CitadelEnv(df)
+
+                self.log_signal.emit("[AI] Waking PPO Neural Network...")
+                # verbose=1 forces SB3 to print its progress to our hijacked stdout
+                model = PPO("MlpPolicy", env, verbose=1)
+
+                self.log_signal.emit(f"[AI] Commencing Training Phase ({timesteps} timesteps)...")
+                model.learn(total_timesteps=timesteps)
+
+                self.log_signal.emit("[AI] Training Complete. Saving weights to memory...")
+                model.save("citadel_ppo_v1")
+                self.log_signal.emit("[AI] Weights safely archived as 'citadel_ppo_v1.zip'.")
+
             # Inject Data AND the new order routing function
             isolated_namespace = {
                 'historical_df': market_data,
                 'pd': pd,
                 'np': np,
                 'send_order': execute_broker_order,  # <--- The Magic Bridge
-                'plot': execute_plot # <--- The Magic Plotting Bridge
+                'plot': execute_plot, # <--- The Magic Plotting Bridge
+                'train_ai': execute_training # <--- The Magic ML Training Bridge
             }
 
             # 3. Execute the user's script
