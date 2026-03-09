@@ -1,5 +1,6 @@
 import os
 import numpy as np
+import pandas as pd
 import torch
 from PyQt6.QtWidgets import (
     QMainWindow, QDockWidget, QListWidget, QTextEdit,
@@ -17,6 +18,8 @@ from engine.streamer import MarketDataStreamer
 from engine.broker import OphirBroker
 from collections import deque
 from stable_baselines3 import PPO
+from ai.vector_state import StateVectorizer
+from ai.risk_engine import AccountState
 
 class OphirTradeIDE(QMainWindow):
     def __init__(self):
@@ -68,21 +71,30 @@ class OphirTradeIDE(QMainWindow):
         self.save_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
         self.save_shortcut.activated.connect(self.save_current_file)
 
-        # --- The AI Ghost Variables ---
+        # --- THE AI GHOST VARIABLES ---
         try:
-            # Attempt to load the trained brain into memory
             self.ai_model = PPO.load("citadel_ppo_v1")
             self.append_log("[SYSTEM] AI Model 'citadel_ppo_v1' loaded and standing by.")
         except Exception as e:
             self.ai_model = None
             self.append_log(f"[WARN] No compiled AI found. Running in manual mode. ({str(e)})")
 
+        # 1. Load your exact training vectorizer and risk engine
+        self.vectorizer = StateVectorizer(lookback_window=10)
+        self.live_account = AccountState()
+
+        # 2. The Real-Time Candle Builder
+        self.live_candles = deque(maxlen=10)
+        self.ticks_per_candle = 25  # E.g., aggregate 25 quote ticks into 1 synthetic "candle"
+        self.tick_counter = 0
+        self.current_candle = {'open': None, 'high': None, 'low': None, 'close': None, 'volume': 0}
+
         # The Execution Lock (0 = Flat, 1 = Long, -1 = Short)
         # This prevents the AI from spamming the exchange.
         self.market_position = 0
 
         # The Observation Window (Must match what the AI was trained on)
-        self.ai_window_size = 10
+        self.ai_window_size = 54
 
     def _build_market_explorer(self):
         dock = QDockWidget("Market Explorer", self)
@@ -291,6 +303,49 @@ class OphirTradeIDE(QMainWindow):
         self.btn_halt.clicked.connect(self.halt_all_trading)
         toolbar.addWidget(self.btn_halt)
 
+    def halt_all_trading(self):
+        """The Master Kill Switch: Severs data, stops the AI, and flattens all positions."""
+        self.append_log("\n[EMERGENCY] =========================================")
+        self.append_log("[EMERGENCY] HALT ALL PROTOCOL INITIATED.")
+
+        # 1. SEVER THE DATA FIREHOSE
+        if self.streamer_thread and self.streamer_thread.isRunning():
+            self.streamer_thread.stop()
+            self.streamer_thread.wait()
+            self.streamer_thread = None
+
+            # Reset the Live Data button UI
+            self.btn_live_data.setText("Connect Live Data Feed")
+            self.btn_live_data.setStyleSheet("background-color: #2b2b2b; color: #50fa7b; border: 1px solid #50fa7b;")
+            self.append_log("[EMERGENCY] WebSocket data stream severed. AI is blind.")
+
+            # Update the AI label
+            self.lbl_ai_confidence.setText("AI State: SYSTEM HALTED")
+            self.lbl_ai_confidence.setStyleSheet(
+                "color: #ff5555; font-weight: bold; font-family: Consolas; padding: 5px;")
+
+        # 2. FLATTEN THE MARKET POSITION
+        # We hardcoded SPY for our test, so we use SPY here.
+        # In a fully dynamic system, you would track the active symbol.
+        target_symbol = "SPY"
+
+        if self.market_position == 1:
+            self.append_log(f"[EMERGENCY] Liquidating LONG position on {target_symbol}...")
+            if self.live_broker:
+                try:
+                    # Fire a Market SELL order to close out the 1 share
+                    response = self.live_broker.route_order(symbol=target_symbol, side="SELL", qty=1, price=None)
+                    self.append_log(f"[BROKER] {response}")
+                except Exception as e:
+                    self.append_log(f"[BROKER FATAL] Failed to route liquidation order: {str(e)}")
+
+            self.market_position = 0
+
+        elif self.market_position == 0:
+            self.append_log("[EMERGENCY] Market position is currently FLAT. No liquidation required.")
+
+        self.append_log("[EMERGENCY] =========================================\n")
+
     # --- The Action Slots (Where the magic will happen) ---
 
     def action_run_backtest(self):
@@ -410,110 +465,103 @@ class OphirTradeIDE(QMainWindow):
                     if self.tick_count % 25 == 0:
                         self.append_log(f"[LIVE MARKET] {symbol} | MID: {mid_price:.2f}")
 
-                    # --- THE AI TRIGGER & TELEMETRY ---
-                    if self.ai_model and len(self.live_price_buffer) >= self.ai_window_size:
+                    # --- 1. BUILD THE OHLCV CANDLE ---
+                    if self.current_candle['open'] is None:
+                        self.current_candle['open'] = mid_price
+                        self.current_candle['high'] = mid_price
+                        self.current_candle['low'] = mid_price
 
-                        # 1. Format the live data
-                        raw_obs = list(self.live_price_buffer)[-self.ai_window_size:]
-                        obs_array = np.array(raw_obs, dtype=np.float32).reshape(1, -1)
+                    self.current_candle['high'] = max(self.current_candle['high'], mid_price)
+                    self.current_candle['low'] = min(self.current_candle['low'], mid_price)
+                    self.current_candle['close'] = mid_price
+                    self.current_candle['volume'] += 1
 
-                        # 2. Get the physical action
-                        action, _states = self.ai_model.predict(obs_array, deterministic=True)
+                    self.tick_counter += 1
 
-                        # 3. INTERROGATE THE NEURAL NETWORK FOR CONFIDENCE
-                        # Move the numpy array to PyTorch tensors on the correct device (CPU/GPU)
-                        obs_tensor = torch.tensor(obs_array).to(self.ai_model.device)
+                    # --- 2. SEAL THE CANDLE AND FEED THE AI ---
+                    if self.tick_counter >= self.ticks_per_candle:
+                        self.live_candles.append(self.current_candle.copy())
 
-                        # Get the probability distribution for this specific market state
-                        dist = self.ai_model.policy.get_distribution(obs_tensor)
-                        probs = dist.distribution.probs.detach().cpu().numpy()[0]
+                        # Reset for the next candle
+                        self.current_candle = {'open': None, 'high': None, 'low': None, 'close': None, 'volume': 0}
+                        self.tick_counter = 0
 
-                        # probs is an array like [0.15, 0.70, 0.15] corresponding to [Hold, Buy, Sell]
-                        action_names = ["HOLD", "BUY", "SELL"]
-                        selected_action_name = action_names[int(action)]
-                        confidence_percentage = probs[int(action)] * 100
+                        # Only trigger the AI if we have a full 10-candle window
+                        if self.ai_model and len(self.live_candles) == 10:
 
-                        # 4. Update the UI Readout in Real-Time
-                        self.lbl_ai_confidence.setText(
-                            f"AI Matrix: {selected_action_name} ({confidence_percentage:.1f}%)")
+                            # Convert our synthetic candles into the exact DataFrame the Vectorizer expects
+                            df_window = pd.DataFrame(list(self.live_candles))
 
-                        # Change color based on action for visual flair
-                        if int(action) == 1:
-                            self.lbl_ai_confidence.setStyleSheet(
-                                "color: #50fa7b; font-weight: bold; font-family: Consolas; padding: 5px;")  # Green for Buy
-                        elif int(action) == 2:
-                            self.lbl_ai_confidence.setStyleSheet(
-                                "color: #ff5555; font-weight: bold; font-family: Consolas; padding: 5px;")  # Red for Sell
-                        else:
-                            self.lbl_ai_confidence.setStyleSheet(
-                                "color: #8be9fd; font-weight: bold; font-family: Consolas; padding: 5px;")  # Cyan for Hold
+                            # MAGIC: Translate the market into the AI's native language!
+                            obs_array = self.vectorizer.process_step(df_window, self.live_account)
 
-                        # 5. Route the AI's intent through the Execution Locks
-                        self._process_ai_action(int(action), symbol, mid_price)
+                            # Reshape for PyTorch -> shape: (1, 54)
+                            obs_tensor = obs_array.reshape(1, -1)
+
+                            # Ask the AI for a decision
+                            action, _states = self.ai_model.predict(obs_tensor, deterministic=True)
+                            action_val = int(action.item())
+
+                            # Get Telemetry
+                            obs_torch = torch.tensor(obs_tensor).to(self.ai_model.device)
+                            dist = self.ai_model.policy.get_distribution(obs_torch)
+                            probs = dist.distribution.probs.detach().cpu().numpy()[0]
+
+                            action_names = ["FLAT", "MICRO (1x)", "MINI (10x)"]
+                            selected_action = action_names[action_val]
+                            conf = probs[action_val] * 100
+
+                            # Update UI Label
+                            self.lbl_ai_confidence.setText(f"AI Matrix: {selected_action} ({conf:.1f}%)")
+
+                            if action_val == 0:
+                                self.lbl_ai_confidence.setStyleSheet(
+                                    "color: #ff5555; font-weight: bold; padding: 5px;")
+                            elif action_val == 1:
+                                self.lbl_ai_confidence.setStyleSheet(
+                                    "color: #f1fa8c; font-weight: bold; padding: 5px;")
+                            elif action_val == 2:
+                                self.lbl_ai_confidence.setStyleSheet(
+                                    "color: #50fa7b; font-weight: bold; padding: 5px;")
+
+                                # Route execution intent
+                            self._process_ai_action(action_val, symbol, mid_price)
 
     def _process_ai_action(self, action: int, symbol: str, current_price: float):
-        """Translates neural network outputs into strictly controlled broker commands."""
+        """Translates the 0 (Flat), 1 (Micro), 2 (Mini) actions into dynamic buy/sell orders."""
 
-        if action == 1 and self.market_position == 0:
-            # AI wants to BUY and we currently hold nothing
-            self.append_log(f"[AI GHOST] Alpha signature detected on {symbol}. Initiating BUY sequence.")
-            self.market_position = 1
+        # Target quantities (Sandbox mapped: Micro = 1 SPY, Mini = 10 SPY)
+        target_qty = 0
+        if action == 1:
+            target_qty = 1
+        elif action == 2:
+            target_qty = 10
 
-            # Fire the physical order!
+        current_qty = self.live_account.current_position
+
+        # If the AI wants to maintain the exact same position, do nothing
+        if target_qty == current_qty:
+            return
+
+            # STATE CHANGE: The AI wants to Flatline the portfolio
+        if action == 0 and current_qty > 0:
+            self.append_log(f"[AI GHOST] Flattening portfolio. Liquidating {current_qty} {symbol}.")
             if self.live_broker:
-                # We use a market order here for instant execution, but a limit is safer in prod
-                response = self.live_broker.route_order(symbol=symbol, side="BUY", qty=1, price=None)
-                self.append_log(f"[BROKER] {response}")
+                self.live_broker.route_order(symbol, "SELL", current_qty)
+            self.live_account.current_position = 0
 
-        elif action == 2 and self.market_position == 1:
-            # AI wants to SELL and we are currently holding a long position
-            self.append_log(f"[AI GHOST] Exit condition met for {symbol}. Initiating SELL sequence.")
-            self.market_position = 0
-
-            # Fire the physical order!
+        # STATE CHANGE: The AI wants to enter or size up
+        elif target_qty > current_qty:
+            qty_to_buy = target_qty - current_qty
+            self.append_log(f"[AI GHOST] Executing Alpha. BUY {qty_to_buy} {symbol}.")
             if self.live_broker:
-                response = self.live_broker.route_order(symbol=symbol, side="SELL", qty=1, price=None)
-                self.append_log(f"[BROKER] {response}")
+                self.live_broker.route_order(symbol, "BUY", qty_to_buy)
+            self.live_account.current_position = target_qty
 
-    def halt_all_trading(self):
-        """The Master Kill Switch: Severs data, stops the AI, and flattens all positions."""
-        self.append_log("\n[EMERGENCY] =========================================")
-        self.append_log("[EMERGENCY] HALT ALL PROTOCOL INITIATED.")
-
-        # 1. SEVER THE DATA FIREHOSE
-        if self.streamer_thread and self.streamer_thread.isRunning():
-            self.streamer_thread.stop()
-            self.streamer_thread.wait()
-            self.streamer_thread = None
-
-            # Reset the Live Data button UI
-            self.btn_live_data.setText("Connect Live Data Feed")
-            self.btn_live_data.setStyleSheet("background-color: #2b2b2b; color: #50fa7b; border: 1px solid #50fa7b;")
-            self.append_log("[EMERGENCY] WebSocket data stream severed. AI is blind.")
-
-            # Update the AI label
-            self.lbl_ai_confidence.setText("AI State: SYSTEM HALTED")
-            self.lbl_ai_confidence.setStyleSheet(
-                "color: #ff5555; font-weight: bold; font-family: Consolas; padding: 5px;")
-
-        # 2. FLATTEN THE MARKET POSITION
-        # We hardcoded SPY for our test, so we use SPY here.
-        # In a fully dynamic system, you would track the active symbol.
-        target_symbol = "SPY"
-
-        if self.market_position == 1:
-            self.append_log(f"[EMERGENCY] Liquidating LONG position on {target_symbol}...")
+        # STATE CHANGE: The AI wants to reduce risk (e.g., Mini down to Micro)
+        elif target_qty < current_qty and target_qty > 0:
+            qty_to_sell = current_qty - target_qty
+            self.append_log(f"[AI GHOST] Risk reduction. SELL {qty_to_sell} {symbol}.")
             if self.live_broker:
-                try:
-                    # Fire a Market SELL order to close out the 1 share
-                    response = self.live_broker.route_order(symbol=target_symbol, side="SELL", qty=1, price=None)
-                    self.append_log(f"[BROKER] {response}")
-                except Exception as e:
-                    self.append_log(f"[BROKER FATAL] Failed to route liquidation order: {str(e)}")
-
-            self.market_position = 0
-
-        elif self.market_position == 0:
-            self.append_log("[EMERGENCY] Market position is currently FLAT. No liquidation required.")
-
-        self.append_log("[EMERGENCY] =========================================\n")
+                self.live_broker.route_order(symbol, "SELL", qty_to_sell)
+            self.live_account.current_position = target_qty
