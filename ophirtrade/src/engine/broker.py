@@ -56,45 +56,47 @@ class OphirBroker:
         self.account = accounts[0]
         print(f"[NETWORK] Secured connection to Account: {self.account.account_number}")
 
-    def route_order(self, symbol: str, side: str, qty: int, price: float = None):
-        """Dynamically routes Equities or Futures with strict Decimal ledger math."""
+    def route_order(self, symbol: str, action_type: str, qty: int, price: float = None):
+        """Routes live market or limit orders to the clearinghouse."""
+        from tastytrade.order import NewOrder, OrderAction, OrderTimeInForce, OrderType, Leg
+        from tastytrade.instruments import InstrumentType
+        from decimal import Decimal
+
         try:
-            # 1. Detect the Asset Class
-            if symbol.startswith('/'):
-                instrument = self.loop.run_until_complete(Future.get(self.session, symbol))
+            # STRICT ACCOUNTING ACTIONS
+            if action_type == "BUY_TO_OPEN":
+                action = OrderAction.BUY_TO_OPEN
+            elif action_type == "SELL_TO_OPEN":
+                action = OrderAction.SELL_TO_OPEN
+            elif action_type == "BUY_TO_CLOSE":
+                action = OrderAction.BUY_TO_CLOSE
+            elif action_type == "SELL_TO_CLOSE":
+                action = OrderAction.SELL_TO_CLOSE
             else:
-                instrument = self.loop.run_until_complete(Equity.get(self.session, symbol))
+                # Fallbacks for backwards compatibility
+                action = OrderAction.BUY_TO_OPEN if "BUY" in action_type else OrderAction.SELL_TO_OPEN
 
-            action = OrderAction.BUY_TO_OPEN if side.upper() == "BUY" else OrderAction.SELL_TO_OPEN
-            order_type = OrderType.LIMIT if price else OrderType.MARKET
-
-            # 2. The v12 SDK strictly requires Decimal objects for quantity
-            dec_qty = Decimal(str(qty))
-            leg = instrument.build_leg(dec_qty, action)
-
-            # 3. Ledger Math Translation
-            # Debits (Buys) MUST be negative. Credits (Sells) MUST be positive.
-            if price is not None:
-                dec_price = Decimal(str(price))
-                if side.upper() == "BUY":
-                    dec_price = -dec_price
-            else:
-                dec_price = None
-
-            order = NewOrder(
-                time_in_force=OrderTimeInForce.DAY,
-                order_type=order_type,
-                legs=[leg],
-                price=dec_price
+            # BUILD THE LEG LOCALLY (Bypasses the get_equity network call)
+            leg = Leg(
+                instrument_type=InstrumentType.EQUITY,
+                symbol=symbol,
+                action=action,
+                quantity=Decimal(str(qty))
             )
 
-            response = self.loop.run_until_complete(
-                self.account.place_order(self.session, order, dry_run=False)
-            )
+            # ROUTE THE ORDER
+            if price:
+                # Limit orders require Decimal prices
+                order = NewOrder(time_in_force=OrderTimeInForce.DAY, order_type=OrderType.LIMIT, legs=[leg],
+                                 price=Decimal(str(price)))
+            else:
+                order = NewOrder(time_in_force=OrderTimeInForce.DAY, order_type=OrderType.MARKET, legs=[leg])
+
+            response = self.loop.run_until_complete(self.account.place_order(self.session, order, dry_run=False))
             return response
 
         except Exception as e:
-            return f"EXECUTION FAILED: {traceback.format_exc()}"
+            return f"EXECUTION FAILED: {str(e)}"
 
     def get_portfolio_status(self):
         """Fetches live account balances and open positions from the clearinghouse."""
