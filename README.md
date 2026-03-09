@@ -346,7 +346,11 @@ Please read our [Code of Conduct](CODE_OF_CONDUCT.md) before participating. Secu
 ---
 
 ## Screenshots
+### New OphirTrade Quant Developer IDE - an institutional-grade trading platform
 <img width="1396" height="930" alt="image" src="https://github.com/user-attachments/assets/63bb8df5-60b9-4d6d-a454-5b5e0f9a89d9" />
+
+### The MTrade light-weight strategy tester and live trading tool built on Flet framework
+<img width="1286" height="923" alt="image" src="https://github.com/user-attachments/assets/9018160a-1d1e-4eff-808e-a4fcbc67a395" />
 
 
 ## License
