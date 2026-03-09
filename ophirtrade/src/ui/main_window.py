@@ -1,9 +1,10 @@
 import os
 import time
+import datetime
 from PyQt6.QtWidgets import (
     QMainWindow, QDockWidget, QListWidget, QTextEdit,
     QToolBar, QPushButton, QWidget, QHBoxLayout,
-    QVBoxLayout, QLabel, QLineEdit
+    QVBoxLayout, QLabel, QLineEdit, QComboBox
 )
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
@@ -42,6 +43,7 @@ class OphirTradeIDE(QMainWindow):
         self.live_price_buffer = deque(maxlen=1000)
         self.live_time_buffer = deque(maxlen=1000)
         self.tick_count = 0
+        self.tick_counter = 0
         self.live_curve = None  # This will hold our specific pyqtgraph line
 
         # Track the currently open file so we can save it
@@ -88,10 +90,9 @@ class OphirTradeIDE(QMainWindow):
         # The Real-Time Candle Builder (Expanded to 250 for the SMA-200 filter)
         self.live_candles = deque(maxlen=250)
 
-        # Aggregate X ticks into 1 synthetic "candle"
-        # (In production, you'd match this to time, e.g., 1 minute)
-        self.ticks_per_candle = 25
-        self.tick_counter = 0
+        # --- TIME-BASED AGGREGATOR ---
+        self.timeframe_minutes = 1  # We can wire this to a UI dropdown later (1, 5, 15)
+        self.current_candle_time = None
         self.current_candle = {'open': None, 'high': None, 'low': None, 'close': None, 'volume': 0}
 
         # Execution Lock: 1 = Long, -1 = Short, 0 = Flat
