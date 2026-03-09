@@ -675,46 +675,68 @@ class OphirTradeIDE(QMainWindow):
 
                     self.tick_counter += 1
 
-                    # --- 2. SEAL THE CANDLE AND FEED THE QUANT ENGINE ---
-                    if self.tick_counter >= self.ticks_per_candle:
+                    # --- 2. TIME-BASED CANDLE AGGREGATOR ---
+                    now = datetime.datetime.now()
+
+                    # Floor the time to the nearest timeframe interval
+                    minute_floored = (now.minute // self.timeframe_minutes) * self.timeframe_minutes
+                    interval_time = now.replace(minute=minute_floored, second=0, microsecond=0)
+
+                    if self.current_candle_time is None:
+                        # First tick initializes the clock
+                        self.current_candle_time = interval_time
+                        self.current_candle['open'] = mid_price
+                        self.current_candle['high'] = mid_price
+                        self.current_candle['low'] = mid_price
+                        self.current_candle['close'] = mid_price
+
+                    if interval_time > self.current_candle_time:
+                        # THE MINUTE HAS ROLLED OVER. SEAL THE CANDLE.
                         sealed_candle = self.current_candle.copy()
                         self.live_candles.append(sealed_candle)
 
-                        # Log to the SQLite database for backtesting replays
-                        self.db.insert_candle(symbol, sealed_candle, time.time())
+                        # Log to the SQLite database
+                        self.db.insert_candle(symbol, sealed_candle, self.current_candle_time.timestamp())
 
-                        # Reset for the next candle
-                        self.current_candle = {'open': None, 'high': None, 'low': None, 'close': None, 'volume': 0}
-                        self.tick_counter = 0
-
-                        # Only trigger the Engine if we have enough candles to calculate the SMA 200
+                        # Trigger the Alpha Engine (if warmed up)
                         if len(self.live_candles) >= 200:
-
-                            # 1. Evaluate the live tape
                             intent = self.alpha_engine.evaluate(list(self.live_candles))
                             action_val = intent["action"]
-                            direction = intent["direction"]
-                            level = intent["level"]
 
-                            # 2. Update UI Telemetry
+                            # UI Updates
                             if action_val == 0:
-                                self.lbl_ai_confidence.setText("Alpha Engine: SCANNING...")
+                                self.lbl_ai_confidence.setText(f"Alpha Engine ({self.timeframe_minutes}m): SCANNING...")
                                 self.lbl_ai_confidence.setStyleSheet("color: #8be9fd; font-weight: bold; padding: 5px;")
                             elif action_val == 1:
-                                self.lbl_ai_confidence.setText(f"Alpha Engine: PRIME BULL GRAB @ {level:.2f}")
+                                self.lbl_ai_confidence.setText(f"Alpha Engine: PRIME BULL GRAB @ {intent['level']:.2f}")
                                 self.lbl_ai_confidence.setStyleSheet("color: #50fa7b; font-weight: bold; padding: 5px;")
                             elif action_val == 2:
-                                self.lbl_ai_confidence.setText(f"Alpha Engine: PRIME BEAR GRAB @ {level:.2f}")
+                                self.lbl_ai_confidence.setText(f"Alpha Engine: PRIME BEAR GRAB @ {intent['level']:.2f}")
                                 self.lbl_ai_confidence.setStyleSheet("color: #ff5555; font-weight: bold; padding: 5px;")
 
-                            # 3. Route to execution locks
                             self._process_quant_action(action_val, symbol, mid_price)
                         else:
-                            # Show a warm-up countdown in the UI
                             candles_needed = 200 - len(self.live_candles)
                             self.lbl_ai_confidence.setText(
                                 f"Alpha Engine: WARMING UP ({candles_needed} candles remaining)")
                             self.lbl_ai_confidence.setStyleSheet("color: #f1fa8c; font-weight: bold; padding: 5px;")
+
+                        # RESET FOR THE NEW INTERVAL
+                        self.current_candle = {
+                            'open': mid_price, 'high': mid_price, 'low': mid_price, 'close': mid_price, 'volume': 0
+                        }
+                        self.current_candle_time = interval_time
+                    else:
+                        # WE ARE STILL IN THE CURRENT MINUTE. UPDATE THE ACTIVE CANDLE.
+                        if self.current_candle['open'] is None:
+                            self.current_candle['open'] = mid_price
+
+                        self.current_candle['close'] = mid_price
+                        if mid_price > (self.current_candle['high'] or mid_price):
+                            self.current_candle['high'] = mid_price
+                        if mid_price < (self.current_candle['low'] or mid_price):
+                            self.current_candle['low'] = mid_price
+                    # ---------------------------------------
 
     def _process_quant_action(self, action: int, symbol: str, current_price: float):
         """Translates Alpha signals into strict risk-managed orders."""
