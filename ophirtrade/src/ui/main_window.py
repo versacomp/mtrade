@@ -11,6 +11,8 @@ from ui.explorer import OphirFileExplorer
 from engine.worker import OphirExecutionEngine
 from ui.blotter import OphirOrderBlotter
 from ui.dashboard import OphirPerformanceDashboard
+from engine.streamer import MarketDataStreamer
+from engine.broker import OphirBroker
 
 class OphirTradeIDE(QMainWindow):
     def __init__(self):
@@ -139,6 +141,16 @@ class OphirTradeIDE(QMainWindow):
         btn_backtest.clicked.connect(self.action_run_backtest)
         toolbar.addWidget(btn_backtest)
 
+        # --- Live Data Toggle ---
+        self.btn_live_data = QPushButton("Connect Live Data Feed")
+        self.btn_live_data.setStyleSheet("background-color: #2b2b2b; color: #50fa7b; border: 1px solid #50fa7b;")
+        self.btn_live_data.clicked.connect(self.toggle_live_stream)
+        toolbar.addWidget(self.btn_live_data)
+
+        # Keep track of the streamer state
+        self.streamer_thread = None
+        self.live_broker = None
+
         # --- Button 2: Deploy Live ---
         btn_live = QPushButton("⚡ Deploy Live")
         btn_live.setStyleSheet("""
@@ -211,3 +223,51 @@ class OphirTradeIDE(QMainWindow):
     def on_execution_finished(self):
         self.terminal.append("[SYSTEM] Background execution terminated gracefully.")
         self.terminal.append("=" * 40 + "\n")
+
+    def toggle_live_stream(self):
+        if self.streamer_thread and self.streamer_thread.isRunning():
+            # Disconnect
+            self.streamer_thread.stop()
+            self.streamer_thread.wait()
+            self.streamer_thread = None
+            self.btn_live_data.setText("Connect Live Data Feed")
+            self.btn_live_data.setStyleSheet("background-color: #2b2b2b; color: #50fa7b; border: 1px solid #50fa7b;")
+            self.append_log("[SYSTEM] Live WebSocket feed terminated.")
+        else:
+            # Connect
+            self.append_log("[SYSTEM] Initializing secure OAuth session for live data...")
+            self.btn_live_data.setText("Connecting...")
+            self.btn_live_data.setStyleSheet("background-color: #f1fa8c; color: #282a36;")
+
+            # We initialize the broker purely to grab the authenticated session
+            try:
+                self.live_broker = OphirBroker(is_live=False)
+
+                # Start the background firehose, locked onto the S&P 500 ETF
+                self.streamer_thread = MarketDataStreamer(symbol="SPY", is_live=False)
+                self.streamer_thread.tick_signal.connect(self.process_live_tick)
+                self.streamer_thread.error_signal.connect(self.append_error)
+                self.streamer_thread.start()
+
+                self.btn_live_data.setText("Disconnect Live Feed")
+                self.btn_live_data.setStyleSheet(
+                    "background-color: #ff5555; color: #f8f8f2; border: 1px solid #ff5555;")
+            except Exception as e:
+                self.append_error(f"[NETWORK ERROR] Failed to authenticate stream: {str(e)}")
+
+    def process_live_tick(self, data: dict):
+        """Catches the tick from the background thread."""
+        if data.get("type") == "status":
+            self.append_log(data.get("msg"))
+        elif data.get("type") == "tick":
+            # For now, we print it to the matrix log.
+            # (Warning: The market firehose is extremely fast!)
+            event = data.get('event_type')
+            symbol = data.get('symbol')
+
+            if event == 'Quote':
+                msg = f"[TICKER] {symbol} | BID: {data.get('bid')} | ASK: {data.get('ask')}"
+                self.append_log(msg)
+            elif event == 'Trade':
+                msg = f"[TICKER] {symbol} | LAST: {data.get('price')} (Trade Executed)"
+                self.append_log(msg)
