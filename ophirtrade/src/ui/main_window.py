@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from PyQt6.QtWidgets import (
     QMainWindow, QDockWidget, QListWidget, QTextEdit,
-    QToolBar, QPushButton, QWidget, QHBoxLayout, QLabel
+    QToolBar, QPushButton, QWidget, QHBoxLayout, QVBoxLayout, QLabel
 )
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
@@ -60,6 +60,9 @@ class OphirTradeIDE(QMainWindow):
 
         # 3. Ignite the Command Center
         self._build_top_toolbar()
+
+        # Build the Portfolio Matrix UI
+        self._build_position_manager()
 
         # Add the Save Shortcut (Ctrl+S or Cmd+S)
         self.save_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
@@ -150,6 +153,85 @@ class OphirTradeIDE(QMainWindow):
         # Stack them on top of each other into tabs (Very PyCharm/VS Code!)
         self.tabifyDockWidget(self.terminal_dock, self.blotter_dock)
         self.blotter_dock.raise_()  # Bring Blotter to the front initially
+
+    def _build_position_manager(self):
+        """Constructs the sidebar dock for live account metrics."""
+        self.dock_positions = QDockWidget("PORTFOLIO MATRIX", self)
+        self.dock_positions.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+
+        # -- Styling --
+        label_style = "color: #f8f8f2; font-family: Consolas; font-size: 14px; padding: 5px;"
+        header_style = "color: #bd93f9; font-family: Consolas; font-size: 16px; font-weight: bold; margin-top: 10px;"
+
+        # -- Metrics Labels --
+        self.lbl_net_liq = QLabel("Net Liq:        $ --")
+        self.lbl_net_liq.setStyleSheet(header_style)
+
+        self.lbl_bp = QLabel("Buying Power:   $ --")
+        self.lbl_bp.setStyleSheet(label_style)
+
+        self.lbl_positions = QLabel("Open Inventory:\nFLAT (0 Positions)")
+        self.lbl_positions.setStyleSheet(label_style)
+
+        # -- Refresh Button --
+        self.btn_refresh_portfolio = QPushButton("⟳ Sync with Exchange")
+        self.btn_refresh_portfolio.setStyleSheet(
+            "background-color: #44475a; color: #f8f8f2; border: 1px solid #6272a4; padding: 5px;")
+        self.btn_refresh_portfolio.clicked.connect(self.refresh_portfolio)
+
+        # Add to layout
+        layout.addWidget(self.lbl_net_liq)
+        layout.addWidget(self.lbl_bp)
+        layout.addWidget(self.lbl_positions)
+        layout.addSpacing(20)
+        layout.addWidget(self.btn_refresh_portfolio)
+        layout.addStretch()  # Pushes everything to the top
+
+        self.dock_positions.setWidget(container)
+
+        # Snap the dock to the right side of the IDE
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_positions)
+
+    def refresh_portfolio(self):
+        """Pulls the latest ledger data and updates the UI."""
+        if not self.live_broker:
+            self.append_log("[SYSTEM] Broker offline. Click 'Connect Live Data Feed' to authenticate first.")
+            return
+
+        self.append_log("[SYSTEM] Syncing portfolio ledgers with Wall Street...")
+        balances, positions = self.live_broker.get_portfolio_status()
+
+        if isinstance(balances, str):
+            self.append_log(f"[PORTFOLIO ERROR] {balances}")
+            return
+
+        # 1. Update Account Balances
+        if balances:
+            # Safely extract the exact Decimal values Tastytrade provides
+            net_liq = getattr(balances, 'net_liquidating_value', 0)
+            bp = getattr(balances, 'equity_buying_power', 0)
+
+            self.lbl_net_liq.setText(f"Net Liq:        ${float(net_liq):,.2f}")
+            self.lbl_bp.setText(f"Buying Power:   ${float(bp):,.2f}")
+
+        # 2. Update Open Positions
+        if positions is not None:
+            if len(positions) == 0:
+                self.lbl_positions.setText("Open Inventory:\n> FLAT (0 Positions)")
+            else:
+                pos_text = "Open Inventory:\n"
+                for p in positions:
+                    sym = getattr(p, 'symbol', 'UNKNOWN')
+                    qty = getattr(p, 'quantity', 0)
+                    pos_text += f"> {sym} : {qty} shares\n"
+
+                self.lbl_positions.setText(pos_text)
+
+        self.append_log("[SYSTEM] Portfolio Sync Complete.")
 
     def _build_top_toolbar(self):
         """Constructs the main execution toolbar at the top of the IDE."""

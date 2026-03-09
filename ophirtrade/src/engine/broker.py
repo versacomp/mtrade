@@ -95,3 +95,13 @@ class OphirBroker:
 
         except Exception as e:
             return f"EXECUTION FAILED: {traceback.format_exc()}"
+
+    def get_portfolio_status(self):
+        """Fetches live account balances and open positions from the clearinghouse."""
+        try:
+            # We use the persistent event loop to cleanly fetch the ledgers
+            balances = self.loop.run_until_complete(self.account.get_balances(self.session))
+            positions = self.loop.run_until_complete(self.account.get_positions(self.session))
+            return balances, positions
+        except Exception as e:
+            return f"ERROR: {str(e)}", None
