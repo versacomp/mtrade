@@ -4,9 +4,10 @@ from PyQt6.QtCore import QThread, pyqtSignal
 import traceback
 from dotenv import load_dotenv
 
-from tastytrade import Session
-from tastytrade.streamer import DXLinkStreamer
-from tastytrade.dxfeed import Quote
+from tastytrade.session import Session
+from tastytrade import DXLinkStreamer
+from tastytrade.dxfeed import Quote, Candle
+from datetime import datetime, timedelta, timezone  # <--- Added timezone
 
 load_dotenv()
 
@@ -40,12 +41,6 @@ class MarketDataStreamer(QThread):
 
     async def _stream_data(self):
         """The core async WebSocket connection."""
-        from tastytrade.session import Session
-        from tastytrade import DXLinkStreamer
-        from tastytrade.dxfeed import Quote, Candle
-        from datetime import datetime, timedelta
-        import os
-        import traceback
 
         try:
             # 1. Initialize an independent Session bound STRICTLY to this thread
@@ -65,30 +60,41 @@ class MarketDataStreamer(QThread):
                 self.tick_signal.emit(
                     {"type": "status", "msg": f"[STREAMER] Requesting DXLink history for {self.symbol}..."})
 
-                # Look back exactly 7 days to guarantee we hit 250 candles
-                start_date = datetime.now() - timedelta(days=7)
+                # STRICT UTC TIMEZONE: Look back 7 days using universal time
+                start_date = datetime.now(timezone.utc) - timedelta(days=7)
                 await streamer.subscribe_candle([self.symbol], '1m', start_date)
 
                 history_candles = []
-                async for event in streamer.listen(Candle):
-                    if not self._is_running: break
 
-                    history_candles.append({
-                        'open': float(event.open),
-                        'high': float(event.high),
-                        'low': float(event.low),
-                        'close': float(event.close),
-                        'volume': float(event.volume)
-                    })
+                # Wrap the listener logic in its own mini async function
+                async def fetch_history():
+                    async for event in streamer.listen(Candle):
+                        if not self._is_running: break
 
-                    # Stop listening to history once the buffer is full
-                    if len(history_candles) >= 250:
-                        break
+                        history_candles.append({
+                            'open': float(event.open),
+                            'high': float(event.high),
+                            'low': float(event.low),
+                            'close': float(event.close),
+                            'volume': float(event.volume)
+                        })
+
+                        # Stop listening if we hit the golden number
+                        if len(history_candles) >= 250:
+                            break
+
+                try:
+                    # THE LOCK: Give dxFeed exactly 5.0 seconds to dump the history.
+                    # If it hangs because it ran out of candles, this forcibly breaks the loop.
+                    await asyncio.wait_for(fetch_history(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    self.tick_signal.emit({"type": "status",
+                                           "msg": f"[STREAMER] History burst completed early. Caught {len(history_candles)} candles."})
 
                 # Emit the historical payload back to the main UI thread
                 self.tick_signal.emit({
                     "type": "history",
-                    "data": history_candles[-250:]  # Ensure exactly 250
+                    "data": history_candles[-250:]  # Cap it just in case
                 })
 
                 # --- PHASE 2: Live Quote Streamer ---
