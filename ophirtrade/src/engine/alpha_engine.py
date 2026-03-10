@@ -42,7 +42,7 @@ class AlphaEngine:
         # The engine requires at least 200 candles to calculate the SMA 200 trend filter
         self.REQUIRED_BUFFER = 200
 
-    def evaluate(self, candles: list, use_trend: bool = True, use_range: bool = True) -> dict:
+    def evaluate(self, raw_candles: list, use_trend: bool = True, use_range: bool = True) -> dict:
         """
         Main entry point. Evaluates the live candle buffer and returns an execution intent.
         Returns: {"action": 0/1/2, "confidence": float, "direction": str, "level": float}

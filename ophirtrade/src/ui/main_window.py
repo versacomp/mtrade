@@ -539,23 +539,6 @@ class OphirTradeIDE(QMainWindow):
                 # Inject the dynamic UI state into the networking engines
                 self.live_broker = OphirBroker(is_live=self.is_live_mode)
 
-                # Dynamic Seeder
-                self.append_log(
-                    f"[SYSTEM] Requesting {yf_interval} historical tape for {self.active_symbol} to seed the Alpha Engine...")
-
-                history = self.live_broker.get_historical_candles(self.active_symbol, interval=yf_interval)
-
-                if isinstance(history, str):
-                    self.append_log(f"[WARN] Seeder failed: {history}. Engine will cold start.")
-                    self.live_candles.clear()
-                else:
-                    self.live_candles.clear()
-                    # Cap the history injection so we don't overflow
-                    for c in history[-250:]:
-                        self.live_candles.append(c)
-                    self.append_log(
-                        f"[SYSTEM] Seeder injected {len(self.live_candles)} historical {yf_interval} candles. Engine ARMED.")
-
                 # 2. Lock the input box so the user can't change it mid-stream
                 self.txt_symbol.setEnabled(False)
 
@@ -571,9 +554,12 @@ class OphirTradeIDE(QMainWindow):
                         f"<span style='color: #8be9fd; font-size: 14pt;'>{self.active_symbol} Live Tape</span>")
                 # ---------------------------------
 
+                # Create the live line with a vibrant Neon Blue/Purple
+                live_pen = pg.mkPen(color='#bd93f9', width=2.5)
+
                 # Use your custom wrapper methods (Optional: update your create_live_line to take a name!)
                 self.chart_widget.clear_chart()
-                self.live_curve = self.chart_widget.create_live_line(name=f"Live {self.active_symbol}")
+                self.live_curve = self.chart_widget.create_live_line(pen=live_pen, name=f"Live {self.active_symbol}")
 
                 # --- NEW: VISUAL OVERLAYS ---
                 # 1. The SMA 200 Line (Golden)
@@ -759,7 +745,7 @@ class OphirTradeIDE(QMainWindow):
                         # Trigger the Alpha Engine (if warmed up)
                         if len(self.live_candles) >= 200:
                             intent = self.alpha_engine.evaluate(
-                                candles=list(self.live_candles),
+                                raw_candles=list(self.live_candles),
                                 use_trend=self.chk_trend.isChecked(),
                                 use_range=self.chk_range.isChecked()
                             )
@@ -804,7 +790,7 @@ class OphirTradeIDE(QMainWindow):
         """Translates Alpha signals into strict risk-managed orders."""
 
         # We need the current timestamp for the X-axis of our chart
-        current_time = time.time()
+        current_x = self.tick_count
 
         # If we are already in a trade, we ignore new signals until it closes (or you can add flip logic)
         if self.active_trade is not None:
@@ -818,7 +804,7 @@ class OphirTradeIDE(QMainWindow):
             self.append_log(f"[QUANT GHOST] Prime BULL liquidity grab detected on {symbol}. Initiating LONG sequence.")
 
             # Paint the Buy Arrow (Green)
-            self.buy_x.append(current_time)
+            self.buy_x.append(current_x)
             self.buy_y.append(current_price)
             self.buy_scatter.setData(self.buy_x, self.buy_y)
 
@@ -849,7 +835,7 @@ class OphirTradeIDE(QMainWindow):
             self.append_log(f"[QUANT GHOST] Prime BEAR liquidity grab detected on {symbol}. Initiating SHORT sequence.")
 
             # Paint the Sell Arrow (Red)
-            self.sell_x.append(current_time)
+            self.sell_x.append(current_x)
             self.sell_y.append(current_price)
             self.sell_scatter.setData(self.sell_x, self.sell_y)
 
@@ -926,16 +912,16 @@ class OphirTradeIDE(QMainWindow):
         t['status'] = status
         t['exit_time'] = time.time()
 
-        current_time = time.time()
+        current_x = self.tick_count
 
         if t['direction'] == 'LONG':
             # Closing a Long is a Sell (Red Down Arrow)
-            self.sell_x.append(current_time)
+            self.sell_x.append(current_x)
             self.sell_y.append(exit_price)
             self.sell_scatter.setData(self.sell_x, self.sell_y)
         else:
             # Closing a Short is a Buy (Green Up Arrow)
-            self.buy_x.append(current_time)
+            self.buy_x.append(current_x)
             self.buy_y.append(exit_price)
             self.buy_scatter.setData(self.buy_x, self.buy_y)
 

@@ -65,8 +65,8 @@ class MarketDataStreamer(QThread):
                 self.tick_signal.emit(
                     {"type": "status", "msg": f"[STREAMER] Requesting DXLink history for {self.symbol}..."})
 
-                # Look back exactly 3 days to guarantee we hit 250 candles
-                start_date = datetime.now() - timedelta(days=3)
+                # Look back exactly 7 days to guarantee we hit 250 candles
+                start_date = datetime.now() - timedelta(days=7)
                 await streamer.subscribe_candle([self.symbol], '1m', start_date)
 
                 history_candles = []

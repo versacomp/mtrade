@@ -1,6 +1,7 @@
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtWidgets import QWidget, QVBoxLayout
+from PyQt6.QtGui import QColor, QFont
 from ui.candlestick import CandlestickItem
 
 
@@ -8,20 +9,38 @@ class OphirTradeChart(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
 
-        pg.setConfigOptions(antialias=True)
-
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
         self.plot_widget = pg.PlotWidget()
-        self.plot_widget.setBackground('#2B2B2B')  # Match Darcula background
-        self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
 
-        axis_pen = pg.mkPen(color='#555555', width=1)
-        self.plot_widget.getAxis('left').setPen(axis_pen)
-        self.plot_widget.getAxis('bottom').setPen(axis_pen)
-        self.plot_widget.getAxis('left').setTextPen('#A9B7C6')
-        self.plot_widget.getAxis('bottom').setTextPen('#A9B7C6')
+        # 1. Global Antialiasing for smooth, modern lines
+        pg.setConfigOptions(antialias=True)
+
+        # Assuming your plot widget is 'self' (if inheriting from PlotWidget)
+        # or 'self.plot_item' / 'self.graph' (if it's an attribute)
+        # Update 'self' below to match your actual graph variable!
+
+        # 2. Deep Dark Background
+        self.plot_widget.setBackground('#1e1e2e')  # A deep, modern dark blue/gray
+
+        # 3. Clean up the Grid Lines
+        self.plot_widget.showGrid(x=True, y=True, alpha=0.2)
+
+        # 4. Style the Axes and Ticks
+        axis_pen = pg.mkPen(color='#6272a4', width=1)
+        text_font = QFont("Consolas", 10)
+
+        for axis_name in ['left', 'bottom']:
+            axis = self.plot_widget.getAxis(axis_name)
+            axis.setPen(axis_pen)  # The axis line itself
+            axis.setTextPen('#8be9fd')  # The text color (Cyan)
+            axis.setTickFont(text_font)  # The font style
+
+        # 5. Remove the ugly default borders
+        self.plot_widget.getPlotItem().hideAxis('right')
+        self.plot_widget.getPlotItem().hideAxis('top')
+        self.plot_widget.getPlotItem().getViewBox().setBorder(None)
 
         layout.addWidget(self.plot_widget)
 
@@ -63,9 +82,9 @@ class OphirTradeChart(QWidget):
         # Change 'self.graph' to whatever your internal pyqtgraph variable is named!
         self.plot_widget.clear()
 
-    def create_live_line(self, name="Live Data"):
+    def create_live_line(self, pen, name="Live Data"):
         """Creates and returns a neon green line for the live WebSocket feed."""
-        return self.plot_widget.plot(pen=pg.mkPen('#50fa7b', width=2), name=name)
+        return self.plot_widget.plot(pen=pen, name=name)
 
     def update_data(self, data):
         """
