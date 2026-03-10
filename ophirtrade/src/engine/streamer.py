@@ -130,7 +130,7 @@ class MarketDataStreamer(QThread):
                     tick_data = {
                         "type": "tick",
                         # Force the original symbol so the UI can match it
-                        "symbol": getattr(event, 'event_symbol', self.symbol),
+                        "symbol": self.symbol,
                         "event_type": type(event).__name__,
                         "bid": getattr(event, 'bid_price', None),
                         "ask": getattr(event, 'ask_price', None)
