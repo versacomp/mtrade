@@ -1,4 +1,9 @@
 import sys
+
+# FORCE THE C++ AI LIBRARIES TO INITIALIZE FIRST
+import torch
+import stable_baselines3
+
 from PyQt6.QtWidgets import QApplication
 from ui.main_window import OphirTradeIDE
 
