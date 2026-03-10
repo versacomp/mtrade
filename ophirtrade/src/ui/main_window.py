@@ -808,11 +808,18 @@ class OphirTradeIDE(QMainWindow):
             self.buy_y.append(current_price)
             self.buy_scatter.setData(self.buy_x, self.buy_y)
 
-            # Risk Math
+            # --- THE FIX: RISK MATH WITH VARIANCE GUARD ---
             sl = signal_candle['low']  # Stop Loss at wick tip
             risk = current_price - sl
-            if risk <= 0: return  # Degenerate candle guard
+
+            # Guard against microscopic rounding/flat candles
+            min_variance = 0.005
+            if risk < min_variance:
+                risk = min_variance
+                sl = current_price - risk
+
             tp = current_price + (risk * 2.0)  # 1:2 R:R Target
+            # ----------------------------------------------
 
             # Arm the Risk Manager
             self.active_trade = {
@@ -839,11 +846,18 @@ class OphirTradeIDE(QMainWindow):
             self.sell_y.append(current_price)
             self.sell_scatter.setData(self.sell_x, self.sell_y)
 
-            # Risk Math
+            # --- THE FIX: RISK MATH WITH VARIANCE GUARD ---
             sl = signal_candle['high']  # Stop Loss at wick tip
             risk = sl - current_price
-            if risk <= 0: return  # Degenerate candle guard
+
+            # Guard against microscopic rounding/flat candles
+            min_variance = 0.005
+            if risk < min_variance:
+                risk = min_variance
+                sl = current_price + risk
+
             tp = current_price - (risk * 2.0)  # 1:2 R:R Target
+            # ----------------------------------------------
 
             # Arm the Risk Manager
             self.active_trade = {
