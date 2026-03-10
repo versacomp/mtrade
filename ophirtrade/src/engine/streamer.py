@@ -40,13 +40,17 @@ class MarketDataStreamer(QThread):
             loop.close()
 
     async def _stream_data(self):
-        """The core async WebSocket connection."""
-
-        self.tick_signal.emit({"type": "status",
-                               "msg": f"[SYSTEM] Initiating dxfeed stream for {self.symbol}."})
+        """The core async WebSocket connection with a self-healing auto-reconnect loop."""
+        from tastytrade.session import Session
+        from tastytrade import DXLinkStreamer
+        from tastytrade.dxfeed import Quote, Candle
+        from datetime import datetime, timedelta, timezone
+        import os
+        import traceback
+        import asyncio
 
         try:
-            # 1. Initialize an independent Session bound STRICTLY to this thread
+            # 1. Initialize Session
             if self.is_live:
                 client_secret = os.getenv("TASTYTRADE_CLIENT_SECRET")
                 refresh_token = os.getenv("TASTYTRADE_REFRESH_TOKEN")
@@ -56,86 +60,79 @@ class MarketDataStreamer(QThread):
                 refresh_token = os.getenv("TASTYTRADE_REFRESH_TOKEN_SANDBOX")
                 session = Session(client_secret, refresh_token, is_test=True)
 
-            # --- NEW: THE DXLINK TRANSLATION MATRIX ---
-            # DXLink requires a 2-digit year and exchange suffix (e.g., /MESH26:XCME).
+            # 2. Translate Symbol
             dxlink_symbol = self.symbol
             if self.symbol.startswith('/'):
                 from tastytrade.instruments import Future
                 try:
-                    # THE FIX: We must 'await' the async .get() method!
                     future = await Future.get(session, self.symbol)
-
-                    # Safely extract the instrument (in case the SDK returns a list)
-                    if isinstance(future, list):
-                        future = future[0]
-
+                    if isinstance(future, list): future = future[0]
                     dxlink_symbol = future.streamer_symbol
-                    self.tick_signal.emit({"type": "status",
-                                           "msg": f"[SYSTEM] Translated {self.symbol} -> {dxlink_symbol} for dxFeed."})
+                    self.tick_signal.emit(
+                        {"type": "status", "msg": f"[SYSTEM] Translated {self.symbol} -> {dxlink_symbol} for dxFeed."})
                 except Exception as e:
                     self.tick_signal.emit({"type": "status", "msg": f"[WARN] Symbol translation failed: {str(e)}"})
-            # ------------------------------------------
 
-            # --- PHASE 1: DXLink Historical Seeder ---
-            # Open a temporary connection just for history
-            async with DXLinkStreamer(session) as history_streamer:
-                self.tick_signal.emit(
-                    {"type": "status", "msg": f"[STREAMER] Requesting DXLink history for {dxlink_symbol}..."})
-
-                # STRICT UTC TIMEZONE: Look back 7 days
-                start_date = datetime.now(timezone.utc) - timedelta(days=7)
-                await history_streamer.subscribe_candle([dxlink_symbol], '1m', start_date)
-
-                history_candles = []
-
-                async def fetch_history():
-                    async for event in history_streamer.listen(Candle):
-                        if not self._is_running: break
-
-                        history_candles.append({
-                            'open': float(event.open),
-                            'high': float(event.high),
-                            'low': float(event.low),
-                            'close': float(event.close),
-                            'volume': float(event.volume)
-                        })
-
-                        if len(history_candles) >= 250:
-                            break
-
+            # --- THE FIX: SELF-HEALING RECONNECTION LOOP ---
+            while self._is_running:
                 try:
-                    await asyncio.wait_for(fetch_history(), timeout=5.0)
-                except asyncio.TimeoutError:
+                    # --- PHASE 1: DXLink Historical Seeder ---
+                    async with DXLinkStreamer(session) as history_streamer:
+                        self.tick_signal.emit(
+                            {"type": "status", "msg": f"[STREAMER] Requesting DXLink history for {dxlink_symbol}..."})
+
+                        start_date = datetime.now(timezone.utc) - timedelta(days=7)
+                        await history_streamer.subscribe_candle([dxlink_symbol], '1m', start_date)
+
+                        history_candles = []
+
+                        async def fetch_history():
+                            async for event in history_streamer.listen(Candle):
+                                if not self._is_running: break
+                                history_candles.append({
+                                    'open': float(event.open), 'high': float(event.high),
+                                    'low': float(event.low), 'close': float(event.close),
+                                    'volume': float(event.volume)
+                                })
+                                if len(history_candles) >= 250: break
+
+                        try:
+                            await asyncio.wait_for(fetch_history(), timeout=5.0)
+                        except asyncio.TimeoutError:
+                            self.tick_signal.emit({"type": "status",
+                                                   "msg": f"[STREAMER] History burst completed early. Caught {len(history_candles)} candles."})
+
+                    self.tick_signal.emit({"type": "history", "data": history_candles[-250:]})
+
+                    # --- PHASE 2: Live Quote Streamer ---
                     self.tick_signal.emit({"type": "status",
-                                           "msg": f"[STREAMER] History burst completed early. Caught {len(history_candles)} candles."})
+                                           "msg": f"[STREAMER] History injected. Locking onto live {dxlink_symbol} tape..."})
 
-            # (The history_streamer automatically, gracefully closes here!)
+                    async with DXLinkStreamer(session) as live_streamer:
+                        await live_streamer.subscribe(Quote, [dxlink_symbol])
 
-            self.tick_signal.emit({
-                "type": "history",
-                "data": history_candles[-250:]
-            })
+                        async for event in live_streamer.listen(Quote):
+                            if not self._is_running: break
 
-            # --- PHASE 2: Live Quote Streamer ---
-            self.tick_signal.emit({"type": "status",
-                                   "msg": f"[STREAMER] History injected. Locking onto live {dxlink_symbol} tape..."})
+                            tick_data = {
+                                "type": "tick",
+                                "symbol": self.symbol,
+                                "event_type": type(event).__name__,
+                                "bid": getattr(event, 'bid_price', None),
+                                "ask": getattr(event, 'ask_price', None)
+                            }
+                            self.tick_signal.emit(tick_data)
 
-            # Open a FRESH connection for the infinite live feed
-            async with DXLinkStreamer(session) as live_streamer:
-                await live_streamer.subscribe(Quote, [dxlink_symbol])
+                except Exception as e:
+                    # If the user clicked Disconnect, exit cleanly
+                    if not self._is_running:
+                        break
 
-                async for event in live_streamer.listen(Quote):
-                    if not self._is_running: break
-
-                    tick_data = {
-                        "type": "tick",
-                        # Force the original symbol so the UI can match it
-                        "symbol": self.symbol,
-                        "event_type": type(event).__name__,
-                        "bid": getattr(event, 'bid_price', None),
-                        "ask": getattr(event, 'ask_price', None)
-                    }
-                    self.tick_signal.emit(tick_data)
+                    # Otherwise, catch the Network Error and Reboot!
+                    error_name = type(e).__name__
+                    self.tick_signal.emit({"type": "status",
+                                           "msg": f"[NETWORK WARNING] Connection dropped ({error_name}). Re-establishing uplink in 3 seconds..."})
+                    await asyncio.sleep(3.0)
 
         except Exception as e:
             self.error_signal.emit(f"[STREAMER DISCONNECT] \n{traceback.format_exc()}")

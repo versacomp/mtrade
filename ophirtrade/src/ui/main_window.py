@@ -233,8 +233,8 @@ class OphirTradeIDE(QMainWindow):
             net_liq = getattr(balances, 'net_liquidating_value', 0)
             bp = getattr(balances, 'equity_buying_power', 0)
 
-            self.lbl_net_liq.setText(f"Net Liq:        ${float(net_liq):,.2f}")
-            self.lbl_bp.setText(f"Buying Power:   ${float(bp):,.2f}")
+            self.lbl_net_liq.setText(f"Net Liq:        ${float(net_liq):,.5f}")
+            self.lbl_bp.setText(f"Buying Power:   ${float(bp):,.5f}")
 
         # 2. Update Open Positions
         if positions is not None:
@@ -704,7 +704,7 @@ class OphirTradeIDE(QMainWindow):
                         )
 
                     if self.tick_count % 25 == 0:
-                        self.append_log(f"[LIVE MARKET] {symbol} | MID: {mid_price:.2f}")
+                        self.append_log(f"[LIVE MARKET] {symbol} | MID: {mid_price:.5f}")
 
                     # --- 1. BUILD THE OHLCV CANDLE ---
                     if self.current_candle['open'] is None:
@@ -756,10 +756,10 @@ class OphirTradeIDE(QMainWindow):
                                 self.lbl_ai_confidence.setText(f"Alpha Engine ({self.timeframe_minutes}m): SCANNING...")
                                 self.lbl_ai_confidence.setStyleSheet("color: #8be9fd; font-weight: bold; padding: 5px;")
                             elif action_val == 1:
-                                self.lbl_ai_confidence.setText(f"Alpha Engine: PRIME BULL GRAB @ {intent['level']:.2f}")
+                                self.lbl_ai_confidence.setText(f"Alpha Engine: PRIME BULL GRAB @ {intent['level']:.5f}")
                                 self.lbl_ai_confidence.setStyleSheet("color: #50fa7b; font-weight: bold; padding: 5px;")
                             elif action_val == 2:
-                                self.lbl_ai_confidence.setText(f"Alpha Engine: PRIME BEAR GRAB @ {intent['level']:.2f}")
+                                self.lbl_ai_confidence.setText(f"Alpha Engine: PRIME BEAR GRAB @ {intent['level']:.5f}")
                                 self.lbl_ai_confidence.setStyleSheet("color: #ff5555; font-weight: bold; padding: 5px;")
 
                             self._process_quant_action(action_val, symbol, mid_price)
@@ -834,7 +834,7 @@ class OphirTradeIDE(QMainWindow):
                 else:
                     response = self.live_broker.route_order(symbol, "BUY", 1)
                     self.market_position = 1
-                    self.append_log(f"[RISK MGR] LONG {symbol} | Entry: {current_price:.2f} | SL: {sl:.2f} | TP: {tp:.2f}")
+                    self.append_log(f"[RISK MGR] LONG {symbol} | Entry: {current_price:.5f} | SL: {sl:.5f} | TP: {tp:.5f}")
                     self.append_log(f"[BROKER] {response}")
 
         # STATE CHANGE: Prime BEAR Signal -> SHORT
@@ -872,7 +872,7 @@ class OphirTradeIDE(QMainWindow):
                 else:
                     response = self.live_broker.route_order(symbol, "SELL_SHORT", 1)
                     self.market_position = -1
-                    self.append_log(f"[RISK MGR] SHORT {symbol} | Entry: {current_price:.2f} | SL: {sl:.2f} | TP: {tp:.2f}")
+                    self.append_log(f"[RISK MGR] SHORT {symbol} | Entry: {current_price:.5f} | SL: {sl:.5f} | TP: {tp:.5f}")
                     self.append_log(f"[BROKER] {response}")
 
     def _on_env_changed(self, text):
@@ -953,7 +953,7 @@ class OphirTradeIDE(QMainWindow):
         # Log to Database
         self.db.log_closed_trade(t)
 
-        self.append_log(f"[RISK MGR] Trade Closed: {status} | P&L: {pnl:.2f} pts | Exit: {exit_price:.2f}")
+        self.append_log(f"[RISK MGR] Trade Closed: {status} | P&L: {pnl:.5f} pts | Exit: {exit_price:.5f}")
 
         # Reset state
         self.active_trade = None
