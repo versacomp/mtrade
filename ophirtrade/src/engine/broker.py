@@ -76,9 +76,16 @@ class OphirBroker:
             else:
                 action = OrderAction.BUY_TO_OPEN  # Fallback
 
+            # --- NEW: DYNAMIC ASSET CLASS ROUTING ---
+            if symbol.startswith('/'):
+                asset_class = InstrumentType.FUTURE
+            else:
+                asset_class = InstrumentType.EQUITY
+            # ----------------------------------------
+
             # BUILD THE LEG LOCALLY
             leg = Leg(
-                instrument_type=InstrumentType.EQUITY,
+                instrument_type=asset_class,  # <--- Pass the dynamic asset class
                 symbol=symbol,
                 action=action,
                 quantity=Decimal(str(qty))
