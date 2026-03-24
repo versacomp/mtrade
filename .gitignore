@@ -31,3 +31,4 @@ dist/
 
 # Claude Code
 .claude
+mtrade_api.log.1
